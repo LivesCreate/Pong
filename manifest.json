@@ -1,0 +1,17 @@
+{
+  "name": "Pong",
+  "short_name": "Pong",
+  "description": "Vertical Pong against an AI opponent.",
+  "version": "1.0.0",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["fullscreen", "standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "icons": [
+    { "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20180%20180'%3E%3Crect%20width='180'%20height='180'%20fill='%23000'/%3E%3Cg%20fill='%23F5B942'%3E%3Crect%20x='54'%20y='40'%20width='72'%20height='12'%20rx='6'/%3E%3Crect%20x='54'%20y='128'%20width='72'%20height='12'%20rx='6'/%3E%3Ccircle%20cx='90'%20cy='90'%20r='12'/%3E%3C/g%3E%3C/svg%3E", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20180%20180'%3E%3Crect%20width='180'%20height='180'%20fill='%23000'/%3E%3Cg%20fill='%23F5B942'%3E%3Crect%20x='54'%20y='40'%20width='72'%20height='12'%20rx='6'/%3E%3Crect%20x='54'%20y='128'%20width='72'%20height='12'%20rx='6'/%3E%3Ccircle%20cx='90'%20cy='90'%20r='12'/%3E%3C/g%3E%3C/svg%3E", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
