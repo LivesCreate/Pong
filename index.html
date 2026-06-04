@@ -113,16 +113,22 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.0.1";
+  var VERSION = "1.0.2";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_STATS = "pong_stats_v1";
   var TARGET = 7;
 
+  // AI + ball tuning per difficulty. These are the knobs to mess with:
+  //   speed   = AI paddle max travel, as a fraction of court height per second (lower = more beatable)
+  //   err     = aim error magnitude, as a fraction of court width (higher = sloppier aim)
+  //   blunder = chance per return that the AI reads the WRONG spot and whiffs (0.10 = 1 in 10)
+  //   react   = reaction delay in seconds before the AI starts moving on a new return
+  //   ball    = serve speed, as a fraction of court height per second
   var DIFFS = {
-    Easy:   { aiSpeed: 0.62, err: 0.22, ball: 0.50 },
-    Normal: { aiSpeed: 0.82, err: 0.12, ball: 0.58 },
-    Hard:   { aiSpeed: 1.05, err: 0.05, ball: 0.66 }
+    Easy:   { speed: 0.42, err: 0.10, blunder: 0.18, react: 0.34, ball: 0.48 },
+    Normal: { speed: 0.58, err: 0.06, blunder: 0.10, react: 0.22, ball: 0.56 },
+    Hard:   { speed: 0.78, err: 0.03, blunder: 0.05, react: 0.12, ball: 0.64 }
   };
 
   function loadJSON(k, fb) { try { var r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (e2) { return fb; } }
@@ -162,7 +168,7 @@
           player: { x: 150, w: 70 }, ai: { x: 150, w: 70 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           ph: 11, pad: 18, serveT: 0,
-          aiErr: 0, wasHeadingUp: false
+          aiErr: 0, wasHeadingUp: false, aiBlunder: false, aiTarget: 150, aiReactT: 0
         };
       }
       return G.current;
@@ -187,7 +193,7 @@
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = 0.7; // brief pause before it moves
-      g.wasHeadingUp = false; g.aiErr = 0;
+      g.wasHeadingUp = false; g.aiErr = 0; g.aiBlunder = false; g.aiReactT = 0;
     }
 
     function newGame() {
@@ -301,21 +307,37 @@
         var dt = Math.min(1 / 30, (t - lastT) / 1000); lastT = t;
         var g = ensureG();
 
-        // AI moves toward a target chosen ONCE per approach (no per-frame twitch)
+        // AI: decide everything ONCE per return (when the ball turns toward it), then hold it.
         var D = DIFFS[diffRef.current];
         var headingUp = g.ball.vy < 0;
         if (headingUp && !g.wasHeadingUp) {
-          g.aiErr = (Math.random() - 0.5) * g.W * D.err; // fixed aim error for this approach
+          if (Math.random() < D.blunder) {
+            // misread: commit to the wrong side and don't track — a real whiff
+            g.aiBlunder = true;
+            g.aiTarget = (g.ball.x < g.W / 2) ? g.W * 0.74 : g.W * 0.26;
+          } else {
+            g.aiBlunder = false;
+            g.aiErr = (Math.random() * 2 - 1) * D.err * g.W; // fixed aim offset for this return
+          }
+          g.aiReactT = D.react; // human reaction delay before it starts moving
         }
         g.wasHeadingUp = headingUp;
-        var targetX = headingUp ? (g.ball.x + g.aiErr) : (g.W / 2); // recenter calmly when ball is away
-        var aiMax = g.H * D.aiSpeed * dt;
-        var dx = targetX - g.ai.x;
-        if (Math.abs(dx) > 3) { // deadzone kills micro-jitter
-          if (Math.abs(dx) > aiMax) dx = (dx > 0 ? 1 : -1) * aiMax;
-          g.ai.x += dx;
-          g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), g.W - g.ai.w / 2);
+
+        if (headingUp) {
+          if (g.aiReactT > 0) {
+            g.aiReactT -= dt; // still reacting — stay put
+          } else {
+            var target = g.aiBlunder ? g.aiTarget : (g.ball.x + g.aiErr);
+            var aiMax = g.H * D.speed * dt; // constant capped speed — never teleports
+            var dx = target - g.ai.x;
+            if (Math.abs(dx) > 3) { // deadzone removes micro-jitter
+              if (Math.abs(dx) > aiMax) dx = (dx > 0 ? 1 : -1) * aiMax;
+              g.ai.x += dx;
+              g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), g.W - g.ai.w / 2);
+            }
+          }
         }
+        // When the ball is moving away, the AI holds position (no fast recenter).
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
