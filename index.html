@@ -113,7 +113,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.0.0";
+  var VERSION = "1.0.1";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_STATS = "pong_stats_v1";
@@ -128,6 +128,16 @@
   function loadJSON(k, fb) { try { var r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (e2) { return fb; } }
   function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e2) {} }
   function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+
+  // Set ball velocity from a desired (vx,vy) direction, normalized to `speed`,
+  // while guaranteeing enough vertical motion that the ball always crosses the court.
+  function applyVel(g, vx, vy, speed) {
+    var minVy = speed * 0.40;
+    if (Math.abs(vy) < minVy) vy = (vy < 0 ? -1 : 1) * minVy;
+    var mag = Math.hypot(vx, vy) || 1;
+    var s = speed / mag;
+    g.ball.vx = vx * s; g.ball.vy = vy * s;
+  }
 
   function Game() {
     var canvasRef = useRef(null);
@@ -151,7 +161,8 @@
           W: 300, H: 460,
           player: { x: 150, w: 70 }, ai: { x: 150, w: 70 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
-          ph: 11, pad: 18, serveT: 0
+          ph: 11, pad: 18, serveT: 0,
+          aiErr: 0, wasHeadingUp: false
         };
       }
       return G.current;
@@ -176,6 +187,7 @@
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = 0.7; // brief pause before it moves
+      g.wasHeadingUp = false; g.aiErr = 0;
     }
 
     function newGame() {
@@ -289,19 +301,21 @@
         var dt = Math.min(1 / 30, (t - lastT) / 1000); lastT = t;
         var g = ensureG();
 
-        // AI moves
+        // AI moves toward a target chosen ONCE per approach (no per-frame twitch)
         var D = DIFFS[diffRef.current];
-        var targetX = g.ball.x + (g.ball.x - g.W / 2) * 0; // base
-        // anticipate with error
-        var err = (Math.random() - 0.5) * g.W * D.err;
-        targetX = g.ball.x + err;
+        var headingUp = g.ball.vy < 0;
+        if (headingUp && !g.wasHeadingUp) {
+          g.aiErr = (Math.random() - 0.5) * g.W * D.err; // fixed aim error for this approach
+        }
+        g.wasHeadingUp = headingUp;
+        var targetX = headingUp ? (g.ball.x + g.aiErr) : (g.W / 2); // recenter calmly when ball is away
         var aiMax = g.H * D.aiSpeed * dt;
-        // only chase hard when ball heading up (toward AI)
-        var chase = g.ball.vy < 0 ? 1 : 0.45;
-        var dx = (targetX - g.ai.x);
-        if (Math.abs(dx) > aiMax) dx = (dx > 0 ? 1 : -1) * aiMax;
-        g.ai.x += dx * chase;
-        g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), g.W - g.ai.w / 2);
+        var dx = targetX - g.ai.x;
+        if (Math.abs(dx) > 3) { // deadzone kills micro-jitter
+          if (Math.abs(dx) > aiMax) dx = (dx > 0 ? 1 : -1) * aiMax;
+          g.ai.x += dx;
+          g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), g.W - g.ai.w / 2);
+        }
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
@@ -318,7 +332,7 @@
         if (g.ball.vy > 0 && g.ball.y + g.ball.r >= pyTop && g.ball.y + g.ball.r <= pyTop + g.ph + 14) {
           if (g.ball.x >= g.player.x - g.player.w / 2 - g.ball.r && g.ball.x <= g.player.x + g.player.w / 2 + g.ball.r) {
             g.ball.y = pyTop - g.ball.r;
-            bounce(g, g.player.x);
+            bounce(g, g.player.x, g.player.w / 2);
           }
         }
         // AI paddle (top)
@@ -326,7 +340,7 @@
         if (g.ball.vy < 0 && g.ball.y - g.ball.r <= ayBot && g.ball.y - g.ball.r >= g.pad - 14) {
           if (g.ball.x >= g.ai.x - g.ai.w / 2 - g.ball.r && g.ball.x <= g.ai.x + g.ai.w / 2 + g.ball.r) {
             g.ball.y = ayBot + g.ball.r;
-            bounce(g, g.ai.x);
+            bounce(g, g.ai.x, g.ai.w / 2);
           }
         }
 
@@ -337,15 +351,14 @@
         draw();
       }
 
-      function bounce(g, paddleCenter) {
-        g.ball.vy = -g.ball.vy;
-        var offset = (g.ball.x - paddleCenter) / (g.player.w / 2); // -1..1
-        var spd = Math.hypot(g.ball.vx, g.ball.vy) * 1.04; // speed up
-        spd = Math.min(spd, g.H * 1.25);
-        var dir = g.ball.vy < 0 ? -1 : 1;
-        var angle = offset * 0.9; // radians-ish steering
-        g.ball.vx = Math.sin(angle) * spd;
-        g.ball.vy = dir * Math.cos(angle) * spd;
+      function bounce(g, center, halfW) {
+        var prevSpeed = Math.hypot(g.ball.vx, g.ball.vy);
+        var speed = Math.min(prevSpeed * 1.05, g.H * 1.3); // rally speeds up, capped
+        var offset = (g.ball.x - center) / halfW;
+        offset = Math.max(-1, Math.min(1, offset)); // clamp so edge hits don't fling oddly
+        var vy = -g.ball.vy; // reflect vertically
+        var vx = g.ball.vx * 0.35 + offset * speed * 0.85; // keep some momentum + add english
+        applyVel(g, vx, vy, speed);
         buzz(10);
       }
 
