@@ -113,11 +113,17 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.0.2";
+  var VERSION = "1.1.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_STATS = "pong_stats_v1";
   var TARGET = 7;
+
+  // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
+  //   FLICK_REF   = how fast you must move the paddle (in court-widths/sec) to max out a flick
+  //   FLICK_SMASH = how much a full-speed EDGE flick multiplies ball speed (higher = punchier)
+  var FLICK_REF = 5;
+  var FLICK_SMASH = 1.1;
 
   // AI + ball tuning per difficulty. These are the knobs to mess with:
   //   speed   = AI paddle max travel, as a fraction of court height per second (lower = more beatable)
@@ -165,8 +171,9 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70 }, ai: { x: 150, w: 70 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0 }, ai: { x: 150, w: 70, prevX: 150, vxS: 0 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
+          trail: [],
           ph: 11, pad: 18, serveT: 0,
           aiErr: 0, wasHeadingUp: false, aiBlunder: false, aiTarget: 150, aiReactT: 0
         };
@@ -194,11 +201,14 @@
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = 0.7; // brief pause before it moves
       g.wasHeadingUp = false; g.aiErr = 0; g.aiBlunder = false; g.aiReactT = 0;
+      g.trail = []; g.player.prevX = g.player.x; g.player.vxS = 0;
     }
 
     function newGame() {
       var g = ensureG(); placePaddles();
       g.player.x = g.W / 2; g.ai.x = g.W / 2;
+      g.player.prevX = g.W / 2; g.ai.prevX = g.W / 2;
+      g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
       setPScore(0); setAScore(0);
       serve(Math.random() < 0.5);
       setMode("playing");
@@ -216,6 +226,7 @@
         g.W = w; g.H = h; placePaddles();
         g.player.x = Math.min(Math.max(g.player.w / 2, g.player.x), w - g.player.w / 2);
         g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), w - g.ai.w / 2);
+        g.player.prevX = g.player.x; g.ai.prevX = g.ai.x;
         draw();
       }
       resize();
@@ -284,6 +295,14 @@
       ctx.fillStyle = "#f5b942";
       rr(ctx, g.ai.x - g.ai.w / 2, g.pad, g.ai.w, g.ph, g.ph / 2);
       rr(ctx, g.player.x - g.player.w / 2, H - g.pad - g.ph, g.player.w, g.ph, g.ph / 2);
+      // ball trail (reads speed on smashes)
+      var tr = g.trail || [];
+      for (var ti = 0; ti < tr.length; ti++) {
+        var a = (ti + 1) / tr.length;
+        ctx.globalAlpha = a * 0.22;
+        ctx.beginPath(); ctx.arc(tr[ti].x, tr[ti].y, g.ball.r * (0.45 + 0.55 * a), 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1;
       // ball
       ctx.beginPath(); ctx.arc(g.ball.x, g.ball.y, g.ball.r, 0, Math.PI * 2); ctx.fill();
     }
@@ -306,6 +325,11 @@
         if (!lastT) { lastT = t; return; }
         var dt = Math.min(1 / 30, (t - lastT) / 1000); lastT = t;
         var g = ensureG();
+
+        // measure how fast the player is swinging the paddle (for the flick/smash)
+        var pvx = (g.player.x - g.player.prevX) / (dt || 0.016);
+        g.player.vxS = g.player.vxS * 0.5 + pvx * 0.5;
+        g.player.prevX = g.player.x;
 
         // AI: decide everything ONCE per return (when the ball turns toward it), then hold it.
         var D = DIFFS[diffRef.current];
@@ -354,7 +378,7 @@
         if (g.ball.vy > 0 && g.ball.y + g.ball.r >= pyTop && g.ball.y + g.ball.r <= pyTop + g.ph + 14) {
           if (g.ball.x >= g.player.x - g.player.w / 2 - g.ball.r && g.ball.x <= g.player.x + g.player.w / 2 + g.ball.r) {
             g.ball.y = pyTop - g.ball.r;
-            bounce(g, g.player.x, g.player.w / 2);
+            bounce(g, g.player.x, g.player.w / 2, g.player.vxS);
           }
         }
         // AI paddle (top)
@@ -362,26 +386,35 @@
         if (g.ball.vy < 0 && g.ball.y - g.ball.r <= ayBot && g.ball.y - g.ball.r >= g.pad - 14) {
           if (g.ball.x >= g.ai.x - g.ai.w / 2 - g.ball.r && g.ball.x <= g.ai.x + g.ai.w / 2 + g.ball.r) {
             g.ball.y = ayBot + g.ball.r;
-            bounce(g, g.ai.x, g.ai.w / 2);
+            bounce(g, g.ai.x, g.ai.w / 2, 0);
           }
         }
 
         // scoring
+        g.trail.push({ x: g.ball.x, y: g.ball.y });
+        if (g.trail.length > 7) g.trail.shift();
         if (g.ball.y - g.ball.r > g.H) { point(false); return; }
         if (g.ball.y + g.ball.r < 0) { point(true); return; }
 
         draw();
       }
 
-      function bounce(g, center, halfW) {
+      function bounce(g, center, halfW, paddleVx) {
         var prevSpeed = Math.hypot(g.ball.vx, g.ball.vy);
-        var speed = Math.min(prevSpeed * 1.05, g.H * 1.3); // rally speeds up, capped
+        var speed = Math.min(prevSpeed * 1.05, g.H * 1.3); // normal rally speed-up
         var offset = (g.ball.x - center) / halfW;
-        offset = Math.max(-1, Math.min(1, offset)); // clamp so edge hits don't fling oddly
-        var vy = -g.ball.vy; // reflect vertically
-        var vx = g.ball.vx * 0.35 + offset * speed * 0.85; // keep some momentum + add english
+        offset = Math.max(-1, Math.min(1, offset));
+        var edgeFrac = Math.abs(offset);
+
+        // FLICK / SMASH: paddle motion at contact transfers speed + direction to the ball.
+        var speedFrac = Math.min(1, Math.abs(paddleVx) / (g.W * FLICK_REF));
+        var smash = 1 + speedFrac * (0.35 + 0.65 * edgeFrac) * FLICK_SMASH; // edge + fast = biggest
+        speed = Math.min(speed * smash, g.H * 2.4); // higher cap so smashes can really fly
+
+        var vy = -g.ball.vy;
+        var vx = g.ball.vx * 0.35 + offset * speed * 0.85 + paddleVx * 0.25; // english + flick direction
         applyVel(g, vx, vy, speed);
-        buzz(10);
+        buzz(smash > 1.4 ? 26 : 10); // meatier thump on a real smash
       }
 
       function point(playerScored) {
