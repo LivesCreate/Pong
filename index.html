@@ -69,16 +69,27 @@
 
   .overlay {
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-    gap: 16px; padding: 24px; text-align: center;
+    gap: 14px; padding: 22px; text-align: center; overflow-y: auto;
     background: rgba(0,0,0,0.72); border-radius: var(--radius); backdrop-filter: blur(2px);
   }
+  .menu-block { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .mode-row { display: flex; gap: 8px; }
+  .mode-tab {
+    background: var(--surface-2); border: 1px solid var(--hairline); color: var(--text-dim);
+    font-family: inherit; font-size: 14px; font-weight: 600; padding: 9px 20px; border-radius: 999px; cursor: pointer;
+    transition: transform 0.12s var(--ease), color 0.15s var(--ease), background 0.15s var(--ease);
+  }
+  .mode-tab:active { transform: scale(0.96); }
+  .mode-tab.active { color: #000; background: var(--amber); border-color: var(--amber); }
+  .pick-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); margin: 4px 0 0; }
   .ov-title { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
   .ov-title.win { color: var(--amber); }
   .ov-sub { font-size: 14px; color: var(--text-dim); margin-top: -6px; }
   .diff-row { display: flex; gap: 8px; }
+  .diff-row.wrap { flex-wrap: wrap; justify-content: center; max-width: 360px; }
   .diff-btn {
     background: var(--surface-2); border: 1px solid var(--hairline); color: var(--text-dim);
-    font-family: inherit; font-size: 14px; font-weight: 600; padding: 10px 16px; border-radius: 999px; cursor: pointer;
+    font-family: inherit; font-size: 13px; font-weight: 600; padding: 9px 14px; border-radius: 999px; cursor: pointer;
     transition: transform 0.12s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
   }
   .diff-btn:active { transform: scale(0.95); }
@@ -113,11 +124,12 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.1.0";
+  var VERSION = "1.2.0";
 
   var LS_DIFF = "pong_diff_v1";
+  var LS_WTOP = "pong_wtop_v1";
+  var LS_WBOT = "pong_wbot_v1";
   var LS_STATS = "pong_stats_v1";
-  var TARGET = 7;
 
   // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
   //   FLICK_REF   = how fast you must move the paddle (in court-widths/sec) to max out a flick
@@ -125,17 +137,65 @@
   var FLICK_REF = 5;
   var FLICK_SMASH = 1.1;
 
-  // AI + ball tuning per difficulty. These are the knobs to mess with:
-  //   speed   = AI paddle max travel, as a fraction of court height per second (lower = more beatable)
-  //   err     = aim error magnitude, as a fraction of court width (higher = sloppier aim)
-  //   blunder = chance per return that the AI reads the WRONG spot and whiffs (0.10 = 1 in 10)
-  //   react   = reaction delay in seconds before the AI starts moving on a new return
+  // Keyboard (A/D, arrows): hold to move, accelerating smoothly the longer you hold.
+  //   KEY_BASE = starting speed in court-widths/sec (low = precise taps)
+  //   KEY_MAX  = top speed in court-widths/sec after holding
+  //   KEY_RAMP = seconds of holding to reach top speed
+  var KEY_BASE = 0.9;
+  var KEY_MAX = 2.6;
+  var KEY_RAMP = 2.0;
+
+  // AI + ball tuning per difficulty. Knobs to mess with:
+  //   speed   = AI paddle max travel, as a fraction of court height per second
+  //   err     = aim error magnitude, as a fraction of court width
+  //   blunder = chance per return the AI reads the WRONG spot and whiffs
+  //   react   = reaction delay in seconds before it starts moving
   //   ball    = serve speed, as a fraction of court height per second
+  // Extreme & Impossible drop the human pretense (no reaction, no error, no blunders).
   var DIFFS = {
-    Easy:   { speed: 0.42, err: 0.10, blunder: 0.18, react: 0.34, ball: 0.48 },
-    Normal: { speed: 0.58, err: 0.06, blunder: 0.10, react: 0.22, ball: 0.56 },
-    Hard:   { speed: 0.78, err: 0.03, blunder: 0.05, react: 0.12, ball: 0.64 }
+    Easy:       { speed: 0.42, err: 0.10,  blunder: 0.18, react: 0.34, ball: 0.50 },
+    Medium:     { speed: 0.58, err: 0.06,  blunder: 0.10, react: 0.22, ball: 0.58 },
+    Hard:       { speed: 0.82, err: 0.03,  blunder: 0.05, react: 0.12, ball: 0.66 },
+    Extreme:    { speed: 1.15, err: 0.015, blunder: 0.02, react: 0.05, ball: 0.74 },
+    Impossible: { speed: 1.80, err: 0.00,  blunder: 0.00, react: 0.00, ball: 0.84 }
   };
+  var DIFF_LIST = ["Easy", "Medium", "Hard", "Extreme", "Impossible"];
+
+  // Drive an AI paddle. `pad` carries its own config + state so two AIs can coexist.
+  function driveAI(g, pad, dt) {
+    var D = pad.cfg; if (!D) return;
+    var heading = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
+    if (heading && !pad.appr) {
+      if (Math.random() < D.blunder) {
+        pad.blunder = true;
+        pad.target = (g.ball.x < g.W / 2) ? g.W * 0.74 : g.W * 0.26;
+      } else {
+        pad.blunder = false;
+        pad.err = (Math.random() * 2 - 1) * D.err * g.W;
+      }
+      pad.reactT = D.react;
+    }
+    pad.appr = heading;
+    if (heading) {
+      if (pad.reactT > 0) { pad.reactT -= dt; }
+      else {
+        var target = pad.blunder ? pad.target : (g.ball.x + pad.err);
+        var maxMove = g.H * D.speed * dt;
+        var dx = target - pad.x;
+        if (Math.abs(dx) > 3) {
+          if (Math.abs(dx) > maxMove) dx = (dx > 0 ? 1 : -1) * maxMove;
+          pad.x += dx;
+          pad.x = Math.min(Math.max(pad.w / 2, pad.x), g.W - pad.w / 2);
+        }
+      }
+    }
+  }
+
+  function cornerBracket(ctx, x, y, sx, sy, L) {
+    ctx.beginPath();
+    ctx.moveTo(x + sx * L, y); ctx.lineTo(x, y); ctx.lineTo(x, y + sy * L);
+    ctx.stroke();
+  }
 
   function loadJSON(k, fb) { try { var r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (e2) { return fb; } }
   function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e2) {} }
@@ -154,8 +214,13 @@
   function Game() {
     var canvasRef = useRef(null);
     var G = useRef(null);
-    var diffS = useState(function () { var d = loadJSON(LS_DIFF, "Normal"); return DIFFS[d] ? d : "Normal"; });
+    var diffS = useState(function () { var d = loadJSON(LS_DIFF, "Medium"); return DIFFS[d] ? d : "Medium"; });
     var diff = diffS[0], setDiff = diffS[1];
+    var topS = useState(function () { var d = loadJSON(LS_WTOP, "Hard"); return DIFFS[d] ? d : "Hard"; });
+    var diffTop = topS[0], setDiffTop = topS[1];
+    var botS = useState(function () { var d = loadJSON(LS_WBOT, "Easy"); return DIFFS[d] ? d : "Easy"; });
+    var diffBottom = botS[0], setDiffBottom = botS[1];
+    var mmS = useState("play"); var menuMode = mmS[0], setMenuMode = mmS[1];
     var statsS = useState(function () { return loadJSON(LS_STATS, { wins: 0, losses: 0 }); });
     var stats = statsS[0], setStats = statsS[1];
     var modeS = useState("menu"); var mode = modeS[0], setMode = modeS[1]; // menu | playing | paused | over
@@ -164,6 +229,9 @@
     var resultS = useState(""); var result = resultS[0], setResult = resultS[1];
 
     var diffRef = useRef(diff); diffRef.current = diff;
+    var topRef = useRef(diffTop); topRef.current = diffTop;
+    var botRef = useRef(diffBottom); botRef.current = diffBottom;
+    var menuModeRef = useRef(menuMode); menuModeRef.current = menuMode;
     var modeRef = useRef(mode); modeRef.current = mode;
 
     // ---- init game state object ----
@@ -171,11 +239,13 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0 }, ai: { x: 150, w: 70, prevX: 150, vxS: 0 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0 },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
-          aiErr: 0, wasHeadingUp: false, aiBlunder: false, aiTarget: 150, aiReactT: 0
+          keyL: false, keyR: false, keyHoldT: 0,
+          spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: ""
         };
       }
       return G.current;
@@ -195,13 +265,16 @@
     function serve(towardPlayer) {
       var g = ensureG();
       g.ball.x = g.W / 2; g.ball.y = g.H / 2;
-      var spd = g.H * DIFFS[diffRef.current].ball;
+      var spd = g.H * g.ballFrac;
       var ang = (Math.random() * 0.5 - 0.25); // small horizontal spread
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = 0.7; // brief pause before it moves
-      g.wasHeadingUp = false; g.aiErr = 0; g.aiBlunder = false; g.aiReactT = 0;
-      g.trail = []; g.player.prevX = g.player.x; g.player.vxS = 0;
+      g.player.appr = false; g.player.reactT = 0; g.player.blunder = false;
+      g.ai.appr = false; g.ai.reactT = 0; g.ai.blunder = false;
+      g.trail = [];
+      g.player.prevX = g.player.x; g.player.vxS = 0;
+      g.ai.prevX = g.ai.x; g.ai.vxS = 0;
     }
 
     function newGame() {
@@ -209,6 +282,26 @@
       g.player.x = g.W / 2; g.ai.x = g.W / 2;
       g.player.prevX = g.W / 2; g.ai.prevX = g.W / 2;
       g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
+      g.keyL = false; g.keyR = false; g.keyHoldT = 0;
+      g.player.appr = false; g.ai.appr = false;
+      g.player.reactT = 0; g.ai.reactT = 0;
+      g.player.blunder = false; g.ai.blunder = false;
+      g.elapsed = 0; g.blink = 0;
+      if (menuModeRef.current === "watch") {
+        g.spectate = true;
+        g.ai.cfg = DIFFS[topRef.current]; g.ai.isAI = true;
+        g.player.cfg = DIFFS[botRef.current]; g.player.isAI = true;
+        g.topLabel = topRef.current; g.bottomLabel = botRef.current;
+        g.target = 10;
+        g.ballFrac = Math.max(DIFFS[topRef.current].ball, DIFFS[botRef.current].ball);
+      } else {
+        g.spectate = false;
+        g.ai.cfg = DIFFS[diffRef.current]; g.ai.isAI = true;
+        g.player.cfg = null; g.player.isAI = false;
+        g.topLabel = diffRef.current; g.bottomLabel = "You";
+        g.target = 7;
+        g.ballFrac = DIFFS[diffRef.current].ball;
+      }
       setPScore(0); setAScore(0);
       serve(Math.random() < 0.5);
       setMode("playing");
@@ -245,31 +338,43 @@
       }
       function onPointer(ev) {
         if (modeRef.current !== "playing") return;
+        var g = ensureG(); if (g.player.isAI) return; // spectating: no control
         if (ev.touches && ev.touches.length) moveTo(ev.touches[0].clientX);
         else moveTo(ev.clientX);
         ev.preventDefault();
       }
-      function onKey(ev) {
+      function onKeyDown(ev) {
         var g = ensureG();
-        if (ev.key === "ArrowLeft" || ev.key === "a" || ev.key === "A") {
-          g.player.x = Math.max(g.player.w / 2, g.player.x - g.W * 0.08);
-        } else if (ev.key === "ArrowRight" || ev.key === "d" || ev.key === "D") {
-          g.player.x = Math.min(g.W - g.player.w / 2, g.player.x + g.W * 0.08);
-        } else if (ev.key === " " || ev.code === "Space") {
+        var k = ev.key;
+        if (k === "ArrowLeft" || k === "a" || k === "A") {
+          ev.preventDefault();
+          if (!g.keyL) { g.keyL = true; if (!g.keyR) g.keyHoldT = 0; }
+        } else if (k === "ArrowRight" || k === "d" || k === "D") {
+          ev.preventDefault();
+          if (!g.keyR) { g.keyR = true; if (!g.keyL) g.keyHoldT = 0; }
+        } else if (k === " " || ev.code === "Space") {
           ev.preventDefault();
           if (modeRef.current === "playing") setMode("paused");
           else if (modeRef.current === "paused") setMode("playing");
         }
       }
+      function onKeyUp(ev) {
+        var g = ensureG();
+        var k = ev.key;
+        if (k === "ArrowLeft" || k === "a" || k === "A") g.keyL = false;
+        else if (k === "ArrowRight" || k === "d" || k === "D") g.keyR = false;
+      }
       canvas.addEventListener("mousemove", onPointer);
       canvas.addEventListener("touchmove", onPointer, { passive: false });
       canvas.addEventListener("touchstart", onPointer, { passive: false });
-      window.addEventListener("keydown", onKey);
+      window.addEventListener("keydown", onKeyDown);
+      window.addEventListener("keyup", onKeyUp);
       return function () {
         canvas.removeEventListener("mousemove", onPointer);
         canvas.removeEventListener("touchmove", onPointer);
         canvas.removeEventListener("touchstart", onPointer);
-        window.removeEventListener("keydown", onKey);
+        window.removeEventListener("keydown", onKeyDown);
+        window.removeEventListener("keyup", onKeyUp);
       };
     }, []);
 
@@ -305,6 +410,32 @@
       ctx.globalAlpha = 1;
       // ball
       ctx.beginPath(); ctx.arc(g.ball.x, g.ball.y, g.ball.r, 0, Math.PI * 2); ctx.fill();
+
+      // spectator broadcast overlay (camera-feed framing)
+      if (g.spectate) {
+        ctx.strokeStyle = "rgba(245,185,66,0.55)"; ctx.lineWidth = 2;
+        var m = 12, L = 20;
+        cornerBracket(ctx, m, m, 1, 1, L);
+        cornerBracket(ctx, W - m, m, -1, 1, L);
+        cornerBracket(ctx, m, H - m, 1, -1, L);
+        cornerBracket(ctx, W - m, H - m, -1, -1, L);
+        ctx.textBaseline = "middle";
+        // LIVE with blinking dot (top-left)
+        var lit = (Math.floor(g.blink * 1.4) % 2) === 0;
+        if (lit) { ctx.fillStyle = "#e0564b"; ctx.beginPath(); ctx.arc(m + 12, m + 22, 4, 0, Math.PI * 2); ctx.fill(); }
+        ctx.fillStyle = "rgba(245,245,247,0.82)";
+        ctx.font = "700 12px ui-monospace, Menlo, monospace";
+        ctx.textAlign = "left"; ctx.fillText("LIVE", m + 22, m + 22);
+        // REC timer (top-right)
+        var sec = Math.floor(g.elapsed), mm = Math.floor(sec / 60), ss = sec % 60;
+        ctx.textAlign = "right"; ctx.fillStyle = "rgba(245,245,247,0.6)";
+        ctx.fillText("REC " + mm + ":" + (ss < 10 ? "0" : "") + ss, W - m - 6, m + 22);
+        // side difficulty labels
+        ctx.textAlign = "center"; ctx.fillStyle = "rgba(245,185,66,0.5)";
+        ctx.font = "700 11px ui-monospace, Menlo, monospace";
+        ctx.fillText(g.topLabel.toUpperCase(), W / 2, g.pad + g.ph + 18);
+        ctx.fillText(g.bottomLabel.toUpperCase(), W / 2, H - g.pad - g.ph - 18);
+      }
     }
     function rr(ctx, x, y, w, h, r) {
       ctx.beginPath();
@@ -326,42 +457,32 @@
         var dt = Math.min(1 / 30, (t - lastT) / 1000); lastT = t;
         var g = ensureG();
 
-        // measure how fast the player is swinging the paddle (for the flick/smash)
+        // measure paddle swing speed (for flick/smash) — both paddles
         var pvx = (g.player.x - g.player.prevX) / (dt || 0.016);
         g.player.vxS = g.player.vxS * 0.5 + pvx * 0.5;
         g.player.prevX = g.player.x;
+        var avx = (g.ai.x - g.ai.prevX) / (dt || 0.016);
+        g.ai.vxS = g.ai.vxS * 0.5 + avx * 0.5;
+        g.ai.prevX = g.ai.x;
 
-        // AI: decide everything ONCE per return (when the ball turns toward it), then hold it.
-        var D = DIFFS[diffRef.current];
-        var headingUp = g.ball.vy < 0;
-        if (headingUp && !g.wasHeadingUp) {
-          if (Math.random() < D.blunder) {
-            // misread: commit to the wrong side and don't track — a real whiff
-            g.aiBlunder = true;
-            g.aiTarget = (g.ball.x < g.W / 2) ? g.W * 0.74 : g.W * 0.26;
+        // keyboard hold-to-move (human only): continuous, accelerating the longer a key is held
+        if (!g.player.isAI) {
+          var kdir = (g.keyL && !g.keyR) ? -1 : ((g.keyR && !g.keyL) ? 1 : 0);
+          if (kdir !== 0) {
+            g.keyHoldT += dt;
+            var ramp = Math.min(1, g.keyHoldT / KEY_RAMP);
+            var kspeed = (KEY_BASE + (KEY_MAX - KEY_BASE) * ramp) * g.W;
+            g.player.x += kdir * kspeed * dt;
+            g.player.x = Math.min(Math.max(g.player.w / 2, g.player.x), g.W - g.player.w / 2);
           } else {
-            g.aiBlunder = false;
-            g.aiErr = (Math.random() * 2 - 1) * D.err * g.W; // fixed aim offset for this return
-          }
-          g.aiReactT = D.react; // human reaction delay before it starts moving
-        }
-        g.wasHeadingUp = headingUp;
-
-        if (headingUp) {
-          if (g.aiReactT > 0) {
-            g.aiReactT -= dt; // still reacting — stay put
-          } else {
-            var target = g.aiBlunder ? g.aiTarget : (g.ball.x + g.aiErr);
-            var aiMax = g.H * D.speed * dt; // constant capped speed — never teleports
-            var dx = target - g.ai.x;
-            if (Math.abs(dx) > 3) { // deadzone removes micro-jitter
-              if (Math.abs(dx) > aiMax) dx = (dx > 0 ? 1 : -1) * aiMax;
-              g.ai.x += dx;
-              g.ai.x = Math.min(Math.max(g.ai.w / 2, g.ai.x), g.W - g.ai.w / 2);
-            }
+            g.keyHoldT = 0;
           }
         }
-        // When the ball is moving away, the AI holds position (no fast recenter).
+
+        // drive the AI paddle(s): top is always AI; bottom too when spectating
+        driveAI(g, g.ai, dt);
+        if (g.player.isAI) driveAI(g, g.player, dt);
+        if (g.spectate) { g.elapsed += dt; g.blink += dt; }
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
@@ -386,7 +507,7 @@
         if (g.ball.vy < 0 && g.ball.y - g.ball.r <= ayBot && g.ball.y - g.ball.r >= g.pad - 14) {
           if (g.ball.x >= g.ai.x - g.ai.w / 2 - g.ball.r && g.ball.x <= g.ai.x + g.ai.w / 2 + g.ball.r) {
             g.ball.y = ayBot + g.ball.r;
-            bounce(g, g.ai.x, g.ai.w / 2, 0);
+            bounce(g, g.ai.x, g.ai.w / 2, g.spectate ? g.ai.vxS : 0);
           }
         }
 
@@ -417,27 +538,32 @@
         buzz(smash > 1.4 ? 26 : 10); // meatier thump on a real smash
       }
 
-      function point(playerScored) {
+      function point(bottomScored) {
         var g = ensureG();
-        if (playerScored) {
+        if (bottomScored) {
           var np = pScoreRef.current + 1; setPScore(np);
-          if (np >= TARGET) return finish(true);
+          if (np >= g.target) return finish(true);
           serve(false);
         } else {
           var na = aScoreRef.current + 1; setAScore(na);
-          if (na >= TARGET) return finish(false);
+          if (na >= g.target) return finish(false);
           serve(true);
         }
         buzz(18);
       }
 
-      function finish(won) {
-        setResult(won ? "win" : "lose");
-        setStats(function (s) {
-          var ns = { wins: s.wins + (won ? 1 : 0), losses: s.losses + (won ? 0 : 1) };
-          saveJSON(LS_STATS, ns); return ns;
-        });
-        buzz(won ? 40 : 24);
+      function finish(bottomWon) {
+        var g = ensureG();
+        if (g.spectate) {
+          setResult(bottomWon ? "bottom" : "top");
+        } else {
+          setResult(bottomWon ? "win" : "lose");
+          setStats(function (s) {
+            var ns = { wins: s.wins + (bottomWon ? 1 : 0), losses: s.losses + (bottomWon ? 0 : 1) };
+            saveJSON(LS_STATS, ns); return ns;
+          });
+        }
+        buzz(bottomWon ? 40 : 24);
         setMode("over");
       }
 
@@ -446,20 +572,41 @@
     }, [mode]);
 
     function chooseDiff(d) { setDiff(d); saveJSON(LS_DIFF, d); }
+    function chooseTop(d) { setDiffTop(d); saveJSON(LS_WTOP, d); }
+    function chooseBottom(d) { setDiffBottom(d); saveJSON(LS_WBOT, d); }
+
+    function pills(sel, onPick) {
+      return e("div", { className: "diff-row wrap" },
+        DIFF_LIST.map(function (d) {
+          return e("button", { key: d, className: "diff-btn" + (sel === d ? " active" : ""), onClick: function () { onPick(d); } }, d);
+        })
+      );
+    }
 
     // ---- overlays ----
+    var spec = G.current && G.current.spectate;
     var overlay = null;
     if (mode === "menu") {
       overlay = e("div", { className: "overlay" },
         e("div", { className: "ov-title" }, "Pong"),
-        e("div", { className: "ov-sub" }, "First to " + TARGET + " \u00B7 you're on the bottom"),
-        e("div", { className: "diff-row" },
-          ["Easy", "Normal", "Hard"].map(function (d) {
-            return e("button", { key: d, className: "diff-btn" + (diff === d ? " active" : ""), onClick: function () { chooseDiff(d); } }, d);
-          })
+        e("div", { className: "mode-row" },
+          e("button", { className: "mode-tab" + (menuMode === "play" ? " active" : ""), onClick: function () { setMenuMode("play"); } }, "Play"),
+          e("button", { className: "mode-tab" + (menuMode === "watch" ? " active" : ""), onClick: function () { setMenuMode("watch"); } }, "Watch AI")
         ),
-        e("button", { className: "btn-primary", onClick: newGame }, "Play"),
-        e("div", { className: "hint" }, "Drag to move \u00B7 ", e("kbd", null, "\u2190\u2192"), " / ", e("kbd", null, "A D"), " \u00B7 ", e("kbd", null, "Space"), " pause")
+        menuMode === "play"
+          ? e("div", { className: "menu-block" },
+              e("div", { className: "ov-sub" }, "First to 7 \u00B7 you're on the bottom"),
+              pills(diff, chooseDiff))
+          : e("div", { className: "menu-block" },
+              e("div", { className: "ov-sub" }, "First to 10 \u00B7 you spectate"),
+              e("div", { className: "pick-label" }, "Top side"),
+              pills(diffTop, chooseTop),
+              e("div", { className: "pick-label" }, "Bottom side"),
+              pills(diffBottom, chooseBottom)),
+        e("button", { className: "btn-primary", onClick: newGame }, menuMode === "play" ? "Play" : "Watch"),
+        menuMode === "play"
+          ? e("div", { className: "hint" }, "Drag to move \u00B7 ", e("kbd", null, "\u2190\u2192"), " / ", e("kbd", null, "A D"), " \u00B7 ", e("kbd", null, "Space"), " pause")
+          : e("div", { className: "hint" }, "Sit back \u2014 it plays itself")
       );
     } else if (mode === "paused") {
       overlay = e("div", { className: "overlay" },
@@ -468,10 +615,19 @@
         e("button", { className: "btn-ghost", onClick: function () { setMode("menu"); } }, "Quit to menu")
       );
     } else if (mode === "over") {
+      var title, sub;
+      if (spec) {
+        var topWon = result === "top";
+        title = (topWon ? "Top wins" : "Bottom wins");
+        sub = aScore + " \u2013 " + pScore + " \u00B7 " + G.current.topLabel + " vs " + G.current.bottomLabel;
+      } else {
+        title = result === "win" ? "You win" : "You lose";
+        sub = pScore + " \u2013 " + aScore + " \u00B7 " + diff;
+      }
       overlay = e("div", { className: "overlay" },
-        e("div", { className: "ov-title" + (result === "win" ? " win" : "") }, result === "win" ? "You win" : "You lose"),
-        e("div", { className: "ov-sub" }, pScore + " \u2013 " + aScore + " \u00B7 " + diff),
-        e("button", { className: "btn-primary", onClick: newGame }, "Play again"),
+        e("div", { className: "ov-title" + ((spec || result === "win") ? " win" : "") }, title),
+        e("div", { className: "ov-sub" }, sub),
+        e("button", { className: "btn-primary", onClick: newGame }, spec ? "Watch again" : "Play again"),
         e("button", { className: "btn-ghost", onClick: function () { setMode("menu"); } }, "Menu")
       );
     }
@@ -480,7 +636,9 @@
       e("div", { className: "bar" },
         e("h1", { className: "title" }, "Pong", e("b", null, ".")),
         e("div", { className: "bar-right" },
-          e("span", { className: "tally" }, "W " + stats.wins + " \u00B7 L " + stats.losses),
+          (spec && mode !== "menu")
+            ? e("span", { className: "tally" }, "AI vs AI")
+            : e("span", { className: "tally" }, "W " + stats.wins + " \u00B7 L " + stats.losses),
           mode === "playing" ? e("button", { className: "pill", onClick: function () { setMode("paused"); } }, "Pause") : null
         )
       ),
