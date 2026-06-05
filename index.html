@@ -124,11 +124,12 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.2.0";
+  var VERSION = "1.3.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
   var LS_WBOT = "pong_wbot_v1";
+  var LS_WUNCAP = "pong_wuncap_v1";
   var LS_STATS = "pong_stats_v1";
 
   // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
@@ -161,17 +162,32 @@
   };
   var DIFF_LIST = ["Easy", "Medium", "Hard", "Extreme", "Impossible"];
 
+  // AI-vs-AI (spectate) tuning — these do NOT affect Player-vs-AI.
+  var SPEC_RAMP = 0.06;   // ball speed growth per second during a rally
+  var SPEC_CAP = 1.6;     // capped max ball speed (court-heights/sec)
+  var SPEC_UNCAP = 7.0;   // "uncapped" safety ceiling (very fast; swept collision handles it)
+  var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
+  var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
+  var SCORE_PAUSE = 1.6;  // seconds the ball rests at center after a point
+  var STALL_LIMIT = 150;  // seconds without a score before the match is called off
+  var STALL_WARN = 60;    // start warning this long before the limit
+
   // Drive an AI paddle. `pad` carries its own config + state so two AIs can coexist.
   function driveAI(g, pad, dt) {
     var D = pad.cfg; if (!D) return;
     var heading = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
+    if (g.spectate) pad.missT -= dt; // countdown to the next forced whiff
     if (heading && !pad.appr) {
-      if (Math.random() < D.blunder) {
+      var forceMiss = g.spectate && pad.missT <= 0;
+      if (forceMiss || Math.random() < D.blunder) {
         pad.blunder = true;
-        pad.target = (g.ball.x < g.W / 2) ? g.W * 0.74 : g.W * 0.26;
+        pad.target = (g.ball.x < g.W / 2) ? g.W * 0.78 : g.W * 0.22;
+        if (forceMiss) pad.missT = MISS_MIN + Math.random() * (MISS_MAX - MISS_MIN);
       } else {
         pad.blunder = false;
         pad.err = (Math.random() * 2 - 1) * D.err * g.W;
+        // spectate: aim for varied contact points (sides) instead of always centering
+        pad.aimOffset = g.spectate ? ((Math.random() < 0.35) ? 0 : (Math.random() * 2 - 1) * 0.7) : 0;
       }
       pad.reactT = D.react;
     }
@@ -179,7 +195,7 @@
     if (heading) {
       if (pad.reactT > 0) { pad.reactT -= dt; }
       else {
-        var target = pad.blunder ? pad.target : (g.ball.x + pad.err);
+        var target = pad.blunder ? pad.target : (g.ball.x - pad.aimOffset * (pad.w / 2) + pad.err);
         var maxMove = g.H * D.speed * dt;
         var dx = target - pad.x;
         if (Math.abs(dx) > 3) {
@@ -220,6 +236,8 @@
     var diffTop = topS[0], setDiffTop = topS[1];
     var botS = useState(function () { var d = loadJSON(LS_WBOT, "Easy"); return DIFFS[d] ? d : "Easy"; });
     var diffBottom = botS[0], setDiffBottom = botS[1];
+    var uncapS = useState(function () { return loadJSON(LS_WUNCAP, false) === true; });
+    var uncap = uncapS[0], setUncap = uncapS[1];
     var mmS = useState("play"); var menuMode = mmS[0], setMenuMode = mmS[1];
     var statsS = useState(function () { return loadJSON(LS_STATS, { wins: 0, losses: 0 }); });
     var stats = statsS[0], setStats = statsS[1];
@@ -231,6 +249,7 @@
     var diffRef = useRef(diff); diffRef.current = diff;
     var topRef = useRef(diffTop); topRef.current = diffTop;
     var botRef = useRef(diffBottom); botRef.current = diffBottom;
+    var uncapRef = useRef(uncap); uncapRef.current = uncap;
     var menuModeRef = useRef(menuMode); menuModeRef.current = menuMode;
     var modeRef = useRef(mode); modeRef.current = mode;
 
@@ -239,13 +258,14 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0 },
-          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
           keyL: false, keyR: false, keyHoldT: 0,
-          spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: ""
+          spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: "",
+          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: ""
         };
       }
       return G.current;
@@ -269,7 +289,8 @@
       var ang = (Math.random() * 0.5 - 0.25); // small horizontal spread
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
-      g.serveT = 0.7; // brief pause before it moves
+      g.serveT = (g.spectate ? SCORE_PAUSE : 0.7); // longer hold at center in spectate
+      g.rallyT = 0;
       g.player.appr = false; g.player.reactT = 0; g.player.blunder = false;
       g.ai.appr = false; g.ai.reactT = 0; g.ai.blunder = false;
       g.trail = [];
@@ -286,9 +307,13 @@
       g.player.appr = false; g.ai.appr = false;
       g.player.reactT = 0; g.ai.reactT = 0;
       g.player.blunder = false; g.ai.blunder = false;
-      g.elapsed = 0; g.blink = 0;
+      g.elapsed = 0; g.blink = 0; g.rallyT = 0; g.sinceScore = 0; g.scoredBy = "";
+      g.player.missT = MISS_MIN + Math.random() * (MISS_MAX - MISS_MIN);
+      g.ai.missT = MISS_MIN + Math.random() * (MISS_MAX - MISS_MIN);
+      g.player.aimOffset = 0; g.ai.aimOffset = 0;
       if (menuModeRef.current === "watch") {
         g.spectate = true;
+        g.uncap = (uncapRef.current === true);
         g.ai.cfg = DIFFS[topRef.current]; g.ai.isAI = true;
         g.player.cfg = DIFFS[botRef.current]; g.player.isAI = true;
         g.topLabel = topRef.current; g.bottomLabel = botRef.current;
@@ -296,6 +321,7 @@
         g.ballFrac = Math.max(DIFFS[topRef.current].ball, DIFFS[botRef.current].ball);
       } else {
         g.spectate = false;
+        g.uncap = false;
         g.ai.cfg = DIFFS[diffRef.current]; g.ai.isAI = true;
         g.player.cfg = null; g.player.isAI = false;
         g.topLabel = diffRef.current; g.bottomLabel = "You";
@@ -435,6 +461,32 @@
         ctx.font = "700 11px ui-monospace, Menlo, monospace";
         ctx.fillText(g.topLabel.toUpperCase(), W / 2, g.pad + g.ph + 18);
         ctx.fillText(g.bottomLabel.toUpperCase(), W / 2, H - g.pad - g.ph - 18);
+
+        // faint scanlines + vignette to sell the "feed" look
+        ctx.fillStyle = "rgba(0,0,0,0.05)";
+        for (var sy = 0; sy < H; sy += 4) ctx.fillRect(0, sy, W, 2);
+        ctx.strokeStyle = "rgba(0,0,0,0.25)"; ctx.lineWidth = 10;
+        ctx.strokeRect(5, 5, W - 10, H - 10);
+
+        // score indicator: ball is resting at center after a point
+        if (g.serveT > 0 && g.scoredBy) {
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillStyle = "rgba(245,185,66,0.9)";
+          ctx.font = "700 26px -apple-system, system-ui, sans-serif";
+          ctx.fillText("POINT", W / 2, H / 2 - 14);
+          ctx.fillStyle = "rgba(245,245,247,0.7)";
+          ctx.font = "700 13px ui-monospace, Menlo, monospace";
+          ctx.fillText(g.scoredBy + " SCORES", W / 2, H / 2 + 12);
+        }
+
+        // stall fail-safe warning + count near the REC tag
+        if (g.sinceScore > STALL_LIMIT - STALL_WARN) {
+          var left = Math.max(0, Math.ceil(STALL_LIMIT - g.sinceScore));
+          ctx.textAlign = "right"; ctx.textBaseline = "middle";
+          ctx.fillStyle = "#e0564b";
+          ctx.font = "700 11px ui-monospace, Menlo, monospace";
+          ctx.fillText("AIs stalling \u00B7 ending in " + left + "s", W - m - 6, m + 40);
+        }
       }
     }
     function rr(ctx, x, y, w, h, r) {
@@ -486,7 +538,18 @@
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
-        // move ball
+        // spectate: ball accelerates over the rally; track stall time
+        if (g.spectate) {
+          g.rallyT += dt; g.sinceScore += dt;
+          var maxSp = g.H * (g.uncap ? SPEC_UNCAP : SPEC_CAP);
+          var sp = Math.hypot(g.ball.vx, g.ball.vy) * (1 + SPEC_RAMP * dt);
+          if (sp > maxSp) sp = maxSp;
+          applyVel(g, g.ball.vx, g.ball.vy, sp);
+          if (g.sinceScore >= STALL_LIMIT) { finish(aScoreRef.current > pScoreRef.current ? false : true, true); return; }
+        }
+
+        // move ball (remember where it came from for swept collision)
+        var bx0 = g.ball.x, by0 = g.ball.y;
         g.ball.x += g.ball.vx * dt;
         g.ball.y += g.ball.vy * dt;
 
@@ -494,20 +557,26 @@
         if (g.ball.x - g.ball.r < 0) { g.ball.x = g.ball.r; g.ball.vx = Math.abs(g.ball.vx); }
         if (g.ball.x + g.ball.r > g.W) { g.ball.x = g.W - g.ball.r; g.ball.vx = -Math.abs(g.ball.vx); }
 
-        // player paddle (bottom)
-        var pyTop = g.H - g.pad - g.ph;
-        if (g.ball.vy > 0 && g.ball.y + g.ball.r >= pyTop && g.ball.y + g.ball.r <= pyTop + g.ph + 14) {
-          if (g.ball.x >= g.player.x - g.player.w / 2 - g.ball.r && g.ball.x <= g.player.x + g.player.w / 2 + g.ball.r) {
-            g.ball.y = pyTop - g.ball.r;
-            bounce(g, g.player.x, g.player.w / 2, g.player.vxS);
+        if (g.spectate) {
+          // swept, per-side collision (handles any speed without clipping through)
+          collideSide(g, g.ai, true, bx0, by0);     // top
+          collideSide(g, g.player, false, bx0, by0); // bottom
+        } else {
+          // player paddle (bottom) — unchanged Player-vs-AI logic
+          var pyTop = g.H - g.pad - g.ph;
+          if (g.ball.vy > 0 && g.ball.y + g.ball.r >= pyTop && g.ball.y + g.ball.r <= pyTop + g.ph + 14) {
+            if (g.ball.x >= g.player.x - g.player.w / 2 - g.ball.r && g.ball.x <= g.player.x + g.player.w / 2 + g.ball.r) {
+              g.ball.y = pyTop - g.ball.r;
+              bounce(g, g.player.x, g.player.vxS);
+            }
           }
-        }
-        // AI paddle (top)
-        var ayBot = g.pad + g.ph;
-        if (g.ball.vy < 0 && g.ball.y - g.ball.r <= ayBot && g.ball.y - g.ball.r >= g.pad - 14) {
-          if (g.ball.x >= g.ai.x - g.ai.w / 2 - g.ball.r && g.ball.x <= g.ai.x + g.ai.w / 2 + g.ball.r) {
-            g.ball.y = ayBot + g.ball.r;
-            bounce(g, g.ai.x, g.ai.w / 2, g.spectate ? g.ai.vxS : 0);
+          // AI paddle (top)
+          var ayBot = g.pad + g.ph;
+          if (g.ball.vy < 0 && g.ball.y - g.ball.r <= ayBot && g.ball.y - g.ball.r >= g.pad - 14) {
+            if (g.ball.x >= g.ai.x - g.ai.w / 2 - g.ball.r && g.ball.x <= g.ai.x + g.ai.w / 2 + g.ball.r) {
+              g.ball.y = ayBot + g.ball.r;
+              bounce(g, g.ai.x, 0);
+            }
           }
         }
 
@@ -520,26 +589,50 @@
         draw();
       }
 
-      function bounce(g, center, halfW, paddleVx) {
+      // ---- swept collision for one side (spectate). Each side is handled separately. ----
+      function collideSide(g, pad, isTop, x0, y0) {
+        if (pad.isTop !== isTop) pad.isTop = isTop; // checker: keep paddle bound to its side
+        var b = g.ball, r = b.r;
+        var movingToward = isTop ? (b.vy < 0) : (b.vy > 0);
+        if (!movingToward) return false;
+        var plane = isTop ? (g.pad + g.ph + r) : (g.H - g.pad - g.ph - r);
+        var crossed = isTop ? (y0 > plane && b.y <= plane) : (y0 < plane && b.y >= plane);
+        if (!crossed) return false;
+        var frac = (plane - y0) / (b.y - y0); if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+        var cx = x0 + (b.x - x0) * frac;            // where the path crossed the paddle line
+        var reach = pad.w / 2 + HIT_MARGIN + r;     // oversized hitbox
+        if (cx >= pad.x - reach && cx <= pad.x + reach) {
+          b.y = plane; b.x = cx;                    // snap to contact point
+          bounce(g, pad.x, pad.vxS);                // bounce off this paddle
+          return true;
+        }
+        return false; // not in range — passes through toward a score
+      }
+
+      function bounce(g, center, paddleVx) {
+        var halfW = (g.ai.w) / 2; // both paddles share width
+        var maxSp = g.spectate ? g.H * (g.uncap ? SPEC_UNCAP : SPEC_CAP) : g.H * 2.4;
         var prevSpeed = Math.hypot(g.ball.vx, g.ball.vy);
-        var speed = Math.min(prevSpeed * 1.05, g.H * 1.3); // normal rally speed-up
+        var speed = Math.min(prevSpeed * 1.05, maxSp); // normal rally speed-up
         var offset = (g.ball.x - center) / halfW;
         offset = Math.max(-1, Math.min(1, offset));
         var edgeFrac = Math.abs(offset);
 
         // FLICK / SMASH: paddle motion at contact transfers speed + direction to the ball.
         var speedFrac = Math.min(1, Math.abs(paddleVx) / (g.W * FLICK_REF));
-        var smash = 1 + speedFrac * (0.35 + 0.65 * edgeFrac) * FLICK_SMASH; // edge + fast = biggest
-        speed = Math.min(speed * smash, g.H * 2.4); // higher cap so smashes can really fly
+        var smash = 1 + speedFrac * (0.35 + 0.65 * edgeFrac) * FLICK_SMASH;
+        speed = Math.min(speed * smash, maxSp);
 
         var vy = -g.ball.vy;
         var vx = g.ball.vx * 0.35 + offset * speed * 0.85 + paddleVx * 0.25; // english + flick direction
         applyVel(g, vx, vy, speed);
-        buzz(smash > 1.4 ? 26 : 10); // meatier thump on a real smash
+        buzz(smash > 1.4 ? 26 : 10);
       }
 
       function point(bottomScored) {
         var g = ensureG();
+        g.sinceScore = 0;
+        g.scoredBy = bottomScored ? "BOTTOM" : "TOP";
         if (bottomScored) {
           var np = pScoreRef.current + 1; setPScore(np);
           if (np >= g.target) return finish(true);
@@ -552,10 +645,10 @@
         buzz(18);
       }
 
-      function finish(bottomWon) {
+      function finish(bottomWon, stalled) {
         var g = ensureG();
         if (g.spectate) {
-          setResult(bottomWon ? "bottom" : "top");
+          setResult(stalled ? "stall" : (bottomWon ? "bottom" : "top"));
         } else {
           setResult(bottomWon ? "win" : "lose");
           setStats(function (s) {
@@ -602,7 +695,12 @@
               e("div", { className: "pick-label" }, "Top side"),
               pills(diffTop, chooseTop),
               e("div", { className: "pick-label" }, "Bottom side"),
-              pills(diffBottom, chooseBottom)),
+              pills(diffBottom, chooseBottom),
+              e("div", { className: "pick-label" }, "Ball speed"),
+              e("div", { className: "diff-row" },
+                e("button", { className: "diff-btn" + (!uncap ? " active" : ""), onClick: function () { setUncap(false); saveJSON(LS_WUNCAP, false); } }, "Capped"),
+                e("button", { className: "diff-btn" + (uncap ? " active" : ""), onClick: function () { setUncap(true); saveJSON(LS_WUNCAP, true); } }, "Uncapped")
+              )),
         e("button", { className: "btn-primary", onClick: newGame }, menuMode === "play" ? "Play" : "Watch"),
         menuMode === "play"
           ? e("div", { className: "hint" }, "Drag to move \u00B7 ", e("kbd", null, "\u2190\u2192"), " / ", e("kbd", null, "A D"), " \u00B7 ", e("kbd", null, "Space"), " pause")
@@ -617,15 +715,19 @@
     } else if (mode === "over") {
       var title, sub;
       if (spec) {
-        var topWon = result === "top";
-        title = (topWon ? "Top wins" : "Bottom wins");
-        sub = aScore + " \u2013 " + pScore + " \u00B7 " + G.current.topLabel + " vs " + G.current.bottomLabel;
+        if (result === "stall") {
+          title = "Match called off";
+          sub = "AIs stalled \u2014 no result \u00B7 " + aScore + " \u2013 " + pScore;
+        } else {
+          title = (result === "top" ? "Top wins" : "Bottom wins");
+          sub = aScore + " \u2013 " + pScore + " \u00B7 " + G.current.topLabel + " vs " + G.current.bottomLabel;
+        }
       } else {
         title = result === "win" ? "You win" : "You lose";
         sub = pScore + " \u2013 " + aScore + " \u00B7 " + diff;
       }
       overlay = e("div", { className: "overlay" },
-        e("div", { className: "ov-title" + ((spec || result === "win") ? " win" : "") }, title),
+        e("div", { className: "ov-title" + ((spec && result !== "stall") || result === "win" ? " win" : "") }, title),
         e("div", { className: "ov-sub" }, sub),
         e("button", { className: "btn-primary", onClick: newGame }, spec ? "Watch again" : "Play again"),
         e("button", { className: "btn-ghost", onClick: function () { setMode("menu"); } }, "Menu")
