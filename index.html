@@ -102,6 +102,10 @@
   .seg-btns { display: flex; border: 1px solid var(--hairline); border-radius: 999px; overflow: hidden; }
   .seg-btn { background: var(--surface-2); border: none; color: var(--text-dim); font-family: inherit; font-size: 12px; font-weight: 600; padding: 7px 13px; cursor: pointer; transition: background 0.14s var(--ease), color 0.14s var(--ease); }
   .seg-btn.active { background: var(--amber); color: #000; }
+  .set-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(330px, 86vw); margin-top: 3px; }
+  .set-rec { font-size: 13px; font-weight: 700; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .set-ver { font-size: 11px; color: var(--text-faint); font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .btn-ghost.danger { color: #e0564b; border-color: #e0564b; }
   .ov-title { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
   .ov-title.win { color: var(--amber); }
   .ov-sub { font-size: 14px; color: var(--text-dim); margin-top: -6px; }
@@ -143,7 +147,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.8.0";
+  var VERSION = "1.9.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -153,6 +157,7 @@
   var LS_WNOMISS = "pong_wnomiss_v1";
   var LS_STATS = "pong_stats_v1";
   var LS_SOUND = "pong_sound_v1";
+  var LS_HAPTICS = "pong_haptics_v1";
 
   // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
   //   FLICK_REF   = how fast you must move the paddle (in court-widths/sec) to max out a flick
@@ -318,7 +323,8 @@
 
   function loadJSON(k, fb) { try { var r = localStorage.getItem(k); return r ? JSON.parse(r) : fb; } catch (e2) { return fb; } }
   function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e2) {} }
-  function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
+  var HAPTICS_ON = true;
+  function buzz(ms) { if (HAPTICS_ON && navigator.vibrate) navigator.vibrate(ms); }
 
   // ---- sound: synthesized blips via Web Audio (no asset files, works offline) ----
   var SND_ON = true, AC = null, lastSnd = {};
@@ -384,6 +390,11 @@
     var soundS = useState(function () { return loadJSON(LS_SOUND, true) !== false; });
     var soundOn = soundS[0], setSoundOn = soundS[1];
     SND_ON = soundOn; // keep the audio module in sync
+    var hapticsS = useState(function () { return loadJSON(LS_HAPTICS, true) !== false; });
+    var hapticsOn = hapticsS[0], setHapticsOn = hapticsS[1];
+    HAPTICS_ON = hapticsOn;
+    var setOpenS = useState(false); var settingsOpen = setOpenS[0], setSettingsOpen = setOpenS[1];
+    var confirmS = useState(false); var confirmReset = confirmS[0], setConfirmReset = confirmS[1];
     var modeS = useState("menu"); var mode = modeS[0], setMode = modeS[1]; // menu | playing | paused | over
     var pS = useState(0); var pScore = pS[0], setPScore = pS[1];
     var aS = useState(0); var aScore = aS[0], setAScore = aS[1];
@@ -397,6 +408,7 @@
     var aiModeRef = useRef(aiMode); aiModeRef.current = aiMode;
     var menuModeRef = useRef(menuMode); menuModeRef.current = menuMode;
     var modeRef = useRef(mode); modeRef.current = mode;
+    var settingsOpenRef = useRef(settingsOpen); settingsOpenRef.current = settingsOpen;
 
     // ---- init game state object ----
     function ensureG() {
@@ -685,6 +697,7 @@
       function step(t) {
         raf = requestAnimationFrame(step);
         if (!lastT) { lastT = t; return; }
+        if (settingsOpenRef.current) { lastT = t; draw(); return; } // frozen while settings open
         var dt = Math.min(1 / 30, (t - lastT) / 1000); lastT = t;
         var g = ensureG();
 
@@ -987,6 +1000,35 @@
       );
     }
 
+    if (settingsOpen) {
+      overlay = e("div", { className: "overlay" },
+        e("div", { className: "ov-title" }, "Settings"),
+        e("div", { className: "menu-block compact" },
+          seg("Sound", [
+            { txt: "On", on: soundOn, onClick: function () { setSoundOn(true); saveJSON(LS_SOUND, true); audioResume(); sfx("ui"); } },
+            { txt: "Off", on: !soundOn, onClick: function () { setSoundOn(false); saveJSON(LS_SOUND, false); } }
+          ]),
+          seg("Haptics", [
+            { txt: "On", on: hapticsOn, onClick: function () { setHapticsOn(true); saveJSON(LS_HAPTICS, true); HAPTICS_ON = true; buzz(18); } },
+            { txt: "Off", on: !hapticsOn, onClick: function () { setHapticsOn(false); saveJSON(LS_HAPTICS, false); } }
+          ]),
+          e("div", { className: "set-row" },
+            e("span", { className: "seg-label" }, "Record"),
+            e("span", { className: "set-rec" }, "W " + stats.wins + " \u00B7 L " + stats.losses)
+          ),
+          e("button", {
+            className: "btn-ghost" + (confirmReset ? " danger" : ""),
+            onClick: function () {
+              if (!confirmReset) { setConfirmReset(true); return; }
+              var z = { wins: 0, losses: 0 }; setStats(z); saveJSON(LS_STATS, z); setConfirmReset(false);
+            }
+          }, confirmReset ? "Tap again to confirm" : "Reset record")
+        ),
+        e("div", { className: "set-ver" }, "Pong v" + VERSION),
+        e("button", { className: "btn-primary", onClick: function () { setConfirmReset(false); setSettingsOpen(false); } }, "Done")
+      );
+    }
+
     return e("div", { className: "wrap" },
       e("div", { className: "bar" },
         e("h1", { className: "title" }, "Pong", e("b", null, "."), e("span", { className: "ver-inline" }, "v" + VERSION)),
@@ -998,6 +1040,7 @@
             className: "pill snd" + (soundOn ? "" : " off"), title: "Sound",
             onClick: function () { var v = !soundOn; setSoundOn(v); saveJSON(LS_SOUND, v); if (v) { audioResume(); sfx("ui"); } }
           }, "\u266A"),
+          e("button", { className: "pill", title: "Settings", onClick: function () { setConfirmReset(false); setSettingsOpen(true); } }, "\u2699"),
           mode === "playing" ? e("button", { className: "pill", onClick: function () { setMode("paused"); } }, "Pause") : null
         )
       ),
