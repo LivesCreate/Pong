@@ -141,7 +141,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.6.2";
+  var VERSION = "1.7.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -194,6 +194,8 @@
   var NOMISS_VIS = 22;        // never-miss: how fast the VISIBLE paddle races to the spot (hitbox teleports)
   var FLAT_VX_FRAC = 0.08;    // |vx|/speed below this counts as "going straight up & down"
   var FLAT_LIMIT = 0.4;       // seconds of near-vertical travel before a random sideways nudge
+  var IDLE_LIMIT = 5;         // seconds an AI paddle may stay still before a point penalty
+  var IDLE_EPS = 2;           // px; movement under this counts as "not moving"
   var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
@@ -217,15 +219,35 @@
     return rel <= span ? lo + rel : lo + (2 * span - rel);
   }
 
+  // Gentle idle drift so an AI paddle never just freezes in place.
+  function wander(g, pad, dt) {
+    pad.wanderT -= dt;
+    if (pad.wanderT <= 0) {
+      pad.wanderX = pad.w / 2 + Math.random() * (g.W - pad.w);
+      pad.wanderT = 0.8 + Math.random() * 1.4;
+    }
+    var spd = g.H * (pad.cfg ? pad.cfg.speed : 0.6) * 0.6 * dt; // slower than active defense
+    var dx = pad.wanderX - pad.x;
+    if (Math.abs(dx) > 2) {
+      if (Math.abs(dx) > spd) dx = (dx > 0 ? 1 : -1) * spd;
+      pad.x += dx;
+      pad.x = Math.min(Math.max(pad.w / 2, pad.x), g.W - pad.w / 2);
+    }
+  }
+
   function driveAI(g, pad, dt) {
     var D = pad.cfg; if (!D) return;
     var heading0 = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
     if (g.noMiss) {
       // hitbox teleports to the predicted landing spot (never misses);
       // the drawn paddle just races there fast so it looks like motion.
-      var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, predictX(g, pad)));
-      pad.x = tx;
-      pad.vis += (tx - pad.vis) * Math.min(1, NOMISS_VIS * dt);
+      if (heading0) {
+        var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, predictX(g, pad)));
+        pad.x = tx;
+      } else {
+        wander(g, pad, dt); // ball moving away — drift so it isn't frozen
+      }
+      pad.vis += (pad.x - pad.vis) * Math.min(1, NOMISS_VIS * dt);
       return;
     }
     var heading = heading0;
@@ -257,6 +279,8 @@
           pad.x = Math.min(Math.max(pad.w / 2, pad.x), g.W - pad.w / 2);
         }
       }
+    } else {
+      wander(g, pad, dt); // ball moving away — keep moving instead of camping
     }
   }
 
@@ -340,8 +364,8 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
-          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0 },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
@@ -386,6 +410,8 @@
       g.player.x = g.W / 2; g.ai.x = g.W / 2;
       g.player.prevX = g.W / 2; g.ai.prevX = g.W / 2;
       g.player.vis = g.W / 2; g.ai.vis = g.W / 2;
+      g.player.lastX2 = g.W / 2; g.ai.lastX2 = g.W / 2;
+      g.player.idleT = 0; g.ai.idleT = 0; g.player.wanderT = 0; g.ai.wanderT = 0;
       g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
       g.keyL = false; g.keyR = false; g.keyHoldT = 0;
       g.player.appr = false; g.ai.appr = false;
@@ -651,6 +677,10 @@
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
+        // anti-idle: penalize an AI paddle that stops moving during active play
+        idleCheck(g, g.ai, dt);
+        if (g.player.isAI) idleCheck(g, g.player, dt);
+
         // spectate: ball eases up through speed tiers, accelerating less as it gets faster
         if (g.spectate) {
           g.rallyT += dt; g.sinceScore += dt;
@@ -773,6 +803,24 @@
         buzz(smash > 1.4 ? 26 : 10);
       }
 
+      function idleCheck(g, pad, dt) {
+        if (!pad.isAI) return;
+        if (Math.abs(pad.x - pad.lastX2) > IDLE_EPS) pad.idleT = 0; else pad.idleT += dt;
+        pad.lastX2 = pad.x;
+        if (pad.idleT > IDLE_LIMIT) {
+          pad.idleT = 0; pad.wanderT = 0; // shove it back into motion
+          // a point shifts from the idle side to the other
+          if (pad.isTop) {
+            if (aScoreRef.current > 0) setAScore(aScoreRef.current - 1);
+            setPScore(pScoreRef.current + 1);
+          } else {
+            if (pScoreRef.current > 0) setPScore(pScoreRef.current - 1);
+            setAScore(aScoreRef.current + 1);
+          }
+          buzz(30);
+        }
+      }
+
       function point(bottomScored) {
         var g = ensureG();
         g.sinceScore = 0;
@@ -780,11 +828,11 @@
         if (bottomScored) {
           var np = pScoreRef.current + 1; setPScore(np);
           if (np >= g.target) return finish(true);
-          serve(false);
+          serve(Math.random() < 0.5);
         } else {
           var na = aScoreRef.current + 1; setAScore(na);
           if (na >= g.target) return finish(false);
-          serve(true);
+          serve(Math.random() < 0.5);
         }
         buzz(18);
       }
