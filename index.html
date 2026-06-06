@@ -71,7 +71,16 @@
     position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
     gap: 14px; padding: 22px; text-align: center; overflow-y: auto;
     background: rgba(0,0,0,0.72); border-radius: var(--radius); backdrop-filter: blur(2px);
+    scrollbar-width: none; -ms-overflow-style: none;
   }
+  .overlay::-webkit-scrollbar { width: 0; height: 0; display: none; }
+  .pause-settings {
+    display: flex; flex-direction: column; gap: 6px; width: 200px;
+    padding: 12px 14px; border: 1px solid var(--hairline); border-radius: 12px; background: var(--surface-2);
+  }
+  .ps-row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .ps-k { font-size: 12px; color: var(--text-faint); }
+  .ps-v { font-size: 13px; font-weight: 700; color: var(--amber); }
   .menu-block { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   .mode-row { display: flex; gap: 8px; }
   .mode-tab {
@@ -124,7 +133,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.4.0";
+  var VERSION = "1.4.1";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -164,9 +173,12 @@
   var DIFF_LIST = ["Easy", "Medium", "Hard", "Extreme", "Impossible"];
 
   // AI-vs-AI (spectate) tuning — these do NOT affect Player-vs-AI.
-  var SPEC_RAMP = 0.03;   // ball speed growth per second during a rally (2x slower)
-  var SPEC_CAP = 1.6;     // capped max ball speed (court-heights/sec)
-  var SPEC_UNCAP = 7.0;   // "uncapped" safety ceiling (very fast; swept collision handles it)
+  // The ball speed eases toward a multiple of the serve speed, accelerating LESS as it
+  // gets faster (tiers ~1x -> 1.5x -> 2.5x -> ~4x), so it looks fast without rocketing.
+  var SPEC_MMAX = 4.0;        // capped: top speed = 4x the serve speed
+  var SPEC_MMAX_UNCAP = 6.5;  // uncapped: higher ceiling
+  var SPEC_TAU = 12;          // seconds; LARGER = slower acceleration
+  var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the time target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
   var SCORE_PAUSE = 1.6;  // seconds the ball rests at center after a point
@@ -448,10 +460,25 @@
       // scores
       var g2 = g;
       if (g2.endless) {
-        // small wrapping digit blocks, each kept within its half (never crossing center)
         var cy = H / 2, fs = 14, mgn = 14, gap = 12;
-        drawScoreBlock(ctx, String(aScoreRef.current), mgn, g.pad + g.ph + 32, W - mgn, cy - gap, fs);
-        drawScoreBlock(ctx, String(pScoreRef.current), mgn, cy + gap, W - mgn, H - g.pad - g.ph - 32, fs);
+        var aStr = String(aScoreRef.current), pStr = String(pScoreRef.current);
+        var bigFont = "700 " + (H * 0.14).toFixed(0) + "px -apple-system, system-ui, sans-serif";
+        // top side
+        if (aStr.length < 5) {
+          ctx.fillStyle = "rgba(245,185,66,0.10)"; ctx.font = bigFont;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(aStr, W / 2, H * 0.28);
+        } else {
+          drawScoreBlock(ctx, aStr, mgn, g.pad + g.ph + 32, W - mgn, cy - gap, fs);
+        }
+        // bottom side
+        if (pStr.length < 5) {
+          ctx.fillStyle = "rgba(245,185,66,0.10)"; ctx.font = bigFont;
+          ctx.textAlign = "center"; ctx.textBaseline = "middle";
+          ctx.fillText(pStr, W / 2, H * 0.72);
+        } else {
+          drawScoreBlock(ctx, pStr, mgn, cy + gap, W - mgn, H - g.pad - g.ph - 32, fs);
+        }
       } else {
         ctx.fillStyle = "rgba(245,185,66,0.10)";
         ctx.font = "700 " + (H * 0.14).toFixed(0) + "px " + "-apple-system, system-ui, sans-serif";
@@ -575,12 +602,17 @@
 
         if (g.serveT > 0) { g.serveT -= dt; draw(); return; }
 
-        // spectate: ball accelerates over the rally; track stall time
+        // spectate: ball eases up through speed tiers, accelerating less as it gets faster
         if (g.spectate) {
           g.rallyT += dt; g.sinceScore += dt;
-          var maxSp = g.H * (g.uncap ? SPEC_UNCAP : SPEC_CAP);
-          var sp = Math.hypot(g.ball.vx, g.ball.vy) * (1 + SPEC_RAMP * dt);
-          if (sp > maxSp) sp = maxSp;
+          var base = g.H * g.ballFrac;
+          var mMax = g.uncap ? SPEC_MMAX_UNCAP : SPEC_MMAX;
+          var m = 1 + (mMax - 1) * (1 - Math.exp(-g.rallyT / SPEC_TAU)); // tapers toward mMax
+          var target = base * m;
+          var sp = Math.hypot(g.ball.vx, g.ball.vy);
+          if (target > sp) sp += (target - sp) * Math.min(1, SPEC_APPROACH * dt); // only push up
+          var capSp = base * mMax;
+          if (sp > capSp) sp = capSp;
           applyVel(g, g.ball.vx, g.ball.vy, sp);
           if (!g.endless && g.sinceScore >= STALL_LIMIT) { finish(aScoreRef.current > pScoreRef.current ? false : true, true); return; }
         }
@@ -648,16 +680,17 @@
 
       function bounce(g, center, paddleVx) {
         var halfW = (g.ai.w) / 2; // both paddles share width
-        var maxSp = g.spectate ? g.H * (g.uncap ? SPEC_UNCAP : SPEC_CAP) : g.H * 2.4;
+        var maxSp = g.spectate ? (g.H * g.ballFrac * (g.uncap ? SPEC_MMAX_UNCAP : SPEC_MMAX)) : g.H * 2.4;
         var prevSpeed = Math.hypot(g.ball.vx, g.ball.vy);
-        var speed = Math.min(prevSpeed * 1.05, maxSp); // normal rally speed-up
+        var grow = g.spectate ? 1.0 : 1.05; // spectate growth is handled by the time curve
+        var speed = Math.min(prevSpeed * grow, maxSp);
         var offset = (g.ball.x - center) / halfW;
         offset = Math.max(-1, Math.min(1, offset));
         var edgeFrac = Math.abs(offset);
 
-        // FLICK / SMASH: paddle motion at contact transfers speed + direction to the ball.
+        // FLICK / SMASH (Player-vs-AI only): paddle motion transfers speed + direction.
         var speedFrac = Math.min(1, Math.abs(paddleVx) / (g.W * FLICK_REF));
-        var smash = 1 + speedFrac * (0.35 + 0.65 * edgeFrac) * FLICK_SMASH;
+        var smash = g.spectate ? 1 : (1 + speedFrac * (0.35 + 0.65 * edgeFrac) * FLICK_SMASH);
         speed = Math.min(speed * smash, maxSp);
 
         var vy = -g.ball.vy;
@@ -751,6 +784,10 @@
     } else if (mode === "paused") {
       overlay = e("div", { className: "overlay" },
         e("div", { className: "ov-title" }, "Paused"),
+        (spec && G.current) ? e("div", { className: "pause-settings" },
+          e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "Ball speed"), e("span", { className: "ps-v" }, G.current.uncap ? "Uncapped" : "Capped")),
+          e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "Match"), e("span", { className: "ps-v" }, G.current.endless ? "Endless" : "First to 10"))
+        ) : null,
         e("button", { className: "btn-primary", onClick: function () { setMode("playing"); } }, "Resume"),
         e("button", { className: "btn-ghost", onClick: function () { setMode("menu"); } }, "Quit to menu")
       );
