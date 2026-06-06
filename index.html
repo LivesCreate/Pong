@@ -126,8 +126,9 @@
   .hint kbd { font-family: var(--mono); background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px; font-size: 10px; }
 
   .ver-inline {
-    font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--text-faint);
-    margin-left: 8px; vertical-align: 2px; font-variant-numeric: tabular-nums;
+    display: inline-block; font-size: 10px; font-weight: 600; letter-spacing: 0.02em; color: var(--text-dim);
+    margin-left: 8px; vertical-align: 3px; font-variant-numeric: tabular-nums;
+    border: 1px solid var(--hairline); border-radius: 999px; padding: 2px 7px;
   }
 </style>
 </head>
@@ -140,7 +141,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.6.1";
+  var VERSION = "1.6.2";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -191,6 +192,8 @@
   var SPEC_CEIL = 16.0;       // uncapped hard safety ceiling
   var SPEC_NOMISS_LOCK = 6.0; // "never miss": ball climbs then LOCKS here (below clip, so no goals)
   var NOMISS_VIS = 22;        // never-miss: how fast the VISIBLE paddle races to the spot (hitbox teleports)
+  var FLAT_VX_FRAC = 0.08;    // |vx|/speed below this counts as "going straight up & down"
+  var FLAT_LIMIT = 0.4;       // seconds of near-vertical travel before a random sideways nudge
   var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
@@ -344,7 +347,7 @@
           ph: 11, pad: 18, serveT: 0,
           keyL: false, keyR: false, keyHoldT: 0,
           spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: "",
-          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false, specM: 1, noMiss: false
+          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false, specM: 1, noMiss: false, flatT: 0
         };
       }
       return G.current;
@@ -369,7 +372,7 @@
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = (g.spectate ? SCORE_PAUSE : 0.7); // longer hold at center in spectate
-      g.rallyT = 0; g.specM = 1;
+      g.rallyT = 0; g.specM = 1; g.flatT = 0;
       g.player.appr = false; g.player.reactT = 0; g.player.blunder = false;
       g.ai.appr = false; g.ai.reactT = 0; g.ai.blunder = false;
       g.trail = [];
@@ -686,6 +689,14 @@
           // swept, per-side collision (handles any speed without clipping through)
           collideSide(g, g.ai, true, bx0, by0);     // top
           collideSide(g, g.player, false, bx0, by0); // bottom
+          // fail-safe: if the ball is just going straight up & down, kick it diagonally
+          var sp2 = Math.hypot(g.ball.vx, g.ball.vy);
+          if (sp2 > 0 && Math.abs(g.ball.vx) < FLAT_VX_FRAC * sp2) g.flatT += dt; else g.flatT = 0;
+          if (g.flatT > FLAT_LIMIT) {
+            var kdirx = Math.random() < 0.5 ? -1 : 1;
+            applyVel(g, kdirx * 0.45, (g.ball.vy >= 0 ? 1 : -1) * 0.89, sp2);
+            g.flatT = 0;
+          }
         } else {
           // player paddle (bottom) — unchanged Player-vs-AI logic
           var pyTop = g.H - g.pad - g.ph;
