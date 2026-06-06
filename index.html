@@ -116,11 +116,9 @@
   .hint { font-size: 12px; color: var(--text-faint); }
   .hint kbd { font-family: var(--mono); background: var(--surface-2); border: 1px solid var(--hairline); border-radius: 4px; padding: 1px 5px; font-size: 10px; }
 
-  .ver-badge {
-    position: fixed; bottom: calc(env(safe-area-inset-bottom) + 16px); right: calc(env(safe-area-inset-right) + 16px);
-    font-size: 11px; font-weight: 600; letter-spacing: 0.04em; color: var(--text-dim);
-    background: var(--surface-2); border: 1px solid var(--hairline); padding: 4px 9px; border-radius: 999px;
-    font-variant-numeric: tabular-nums; z-index: 30; pointer-events: none;
+  .ver-inline {
+    font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--text-faint);
+    margin-left: 8px; vertical-align: 2px; font-variant-numeric: tabular-nums;
   }
 </style>
 </head>
@@ -133,7 +131,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.4.1";
+  var VERSION = "1.5.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -173,12 +171,15 @@
   var DIFF_LIST = ["Easy", "Medium", "Hard", "Extreme", "Impossible"];
 
   // AI-vs-AI (spectate) tuning — these do NOT affect Player-vs-AI.
-  // The ball speed eases toward a multiple of the serve speed, accelerating LESS as it
-  // gets faster (tiers ~1x -> 1.5x -> 2.5x -> ~4x), so it looks fast without rocketing.
-  var SPEC_MMAX = 4.0;        // capped: top speed = 4x the serve speed
-  var SPEC_MMAX_UNCAP = 6.5;  // uncapped: higher ceiling
-  var SPEC_TAU = 12;          // seconds; LARGER = slower acceleration
-  var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the time target
+  // Capped: eases to ~4x serve speed and holds. Uncapped: climbs in stages with the
+  // acceleration easing off each tier (fast to 4x, slower 4x->10x, slower still beyond),
+  // and once very fast the ball starts slipping past the paddles to end the rally.
+  var SPEC_MMAX = 4.0;        // capped mode plateau (x serve speed)
+  var SPEC_RATE = 0.45;       // uncapped multiplier growth/sec in stage 1 (1x -> 4x)
+  var SPEC_T2 = 10.0;         // uncapped stage-2 ceiling (4x -> 10x runs ~4x slower)
+  var SPEC_CLIP = 9.0;        // above this multiplier, fast balls begin clipping through
+  var SPEC_CEIL = 16.0;       // uncapped hard safety ceiling
+  var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
   var SCORE_PAUSE = 1.6;  // seconds the ball rests at center after a point
@@ -191,7 +192,7 @@
     var heading = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
     if (g.spectate) pad.missT -= dt; // countdown to the next forced whiff
     if (heading && !pad.appr) {
-      var forceMiss = g.spectate && pad.missT <= 0;
+      var forceMiss = g.spectate && !g.uncap && pad.missT <= 0;
       if (forceMiss || Math.random() < D.blunder) {
         pad.blunder = true;
         pad.target = (g.ball.x < g.W / 2) ? g.W * 0.78 : g.W * 0.22;
@@ -304,7 +305,7 @@
           ph: 11, pad: 18, serveT: 0,
           keyL: false, keyR: false, keyHoldT: 0,
           spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: "",
-          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false
+          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false, specM: 1
         };
       }
       return G.current;
@@ -329,7 +330,7 @@
       g.ball.vx = Math.sin(ang) * spd;
       g.ball.vy = (towardPlayer ? 1 : -1) * Math.cos(ang) * spd;
       g.serveT = (g.spectate ? SCORE_PAUSE : 0.7); // longer hold at center in spectate
-      g.rallyT = 0;
+      g.rallyT = 0; g.specM = 1;
       g.player.appr = false; g.player.reactT = 0; g.player.blunder = false;
       g.ai.appr = false; g.ai.reactT = 0; g.ai.blunder = false;
       g.trail = [];
@@ -606,12 +607,20 @@
         if (g.spectate) {
           g.rallyT += dt; g.sinceScore += dt;
           var base = g.H * g.ballFrac;
-          var mMax = g.uncap ? SPEC_MMAX_UNCAP : SPEC_MMAX;
-          var m = 1 + (mMax - 1) * (1 - Math.exp(-g.rallyT / SPEC_TAU)); // tapers toward mMax
-          var target = base * m;
+          if (g.uncap) {
+            // stage the climb: each tier accelerates more slowly than the last
+            var rate;
+            if (g.specM < SPEC_MMAX) rate = SPEC_RATE;            // 1x -> 4x
+            else if (g.specM < SPEC_T2) rate = SPEC_RATE / 4;     // 4x -> 10x (~4x slower)
+            else rate = SPEC_RATE / 4 / 1.5;                      // >10x (another 1.5x slower)
+            g.specM = Math.min(SPEC_CEIL, g.specM + rate * dt);
+          } else {
+            g.specM += (SPEC_MMAX - g.specM) * Math.min(1, 0.6 * dt); // ease to 4x and hold
+          }
+          var capSp = base * (g.uncap ? SPEC_CEIL : SPEC_MMAX);
+          var target = base * g.specM;
           var sp = Math.hypot(g.ball.vx, g.ball.vy);
           if (target > sp) sp += (target - sp) * Math.min(1, SPEC_APPROACH * dt); // only push up
-          var capSp = base * mMax;
           if (sp > capSp) sp = capSp;
           applyVel(g, g.ball.vx, g.ball.vy, sp);
           if (!g.endless && g.sinceScore >= STALL_LIMIT) { finish(aScoreRef.current > pScoreRef.current ? false : true, true); return; }
@@ -670,6 +679,11 @@
         var frac = (plane - y0) / (b.y - y0); if (frac < 0) frac = 0; if (frac > 1) frac = 1;
         var cx = x0 + (b.x - x0) * frac;            // where the path crossed the paddle line
         var reach = pad.w / 2 + HIT_MARGIN + r;     // oversized hitbox
+        if (g.uncap && g.specM > SPEC_CLIP) {
+          // beyond clip speed the paddle can no longer fully cover — fast balls slip past
+          var over = Math.min(1, (g.specM - SPEC_CLIP) / (SPEC_CEIL - SPEC_CLIP));
+          reach = (pad.w / 2 + HIT_MARGIN + r) - over * (pad.w / 2 + HIT_MARGIN + r + pad.w * 0.5);
+        }
         if (cx >= pad.x - reach && cx <= pad.x + reach) {
           b.y = plane; b.x = cx;                    // snap to contact point
           bounce(g, pad.x, pad.vxS);                // bounce off this paddle
@@ -680,7 +694,7 @@
 
       function bounce(g, center, paddleVx) {
         var halfW = (g.ai.w) / 2; // both paddles share width
-        var maxSp = g.spectate ? (g.H * g.ballFrac * (g.uncap ? SPEC_MMAX_UNCAP : SPEC_MMAX)) : g.H * 2.4;
+        var maxSp = g.spectate ? (g.H * g.ballFrac * (g.uncap ? SPEC_CEIL : SPEC_MMAX)) : g.H * 2.4;
         var prevSpeed = Math.hypot(g.ball.vx, g.ball.vy);
         var grow = g.spectate ? 1.0 : 1.05; // spectate growth is handled by the time curve
         var speed = Math.min(prevSpeed * grow, maxSp);
@@ -815,7 +829,7 @@
 
     return e("div", { className: "wrap" },
       e("div", { className: "bar" },
-        e("h1", { className: "title" }, "Pong", e("b", null, ".")),
+        e("h1", { className: "title" }, "Pong", e("b", null, "."), e("span", { className: "ver-inline" }, "v" + VERSION)),
         e("div", { className: "bar-right" },
           (spec && mode !== "menu")
             ? e("span", { className: "tally" }, "AI vs AI")
@@ -826,8 +840,7 @@
       e("div", { className: "court-wrap" },
         e("canvas", { ref: canvasRef, className: "court" }),
         overlay
-      ),
-      e("div", { className: "ver-badge" }, "v" + VERSION)
+      )
     );
   }
 
