@@ -60,6 +60,8 @@
     transition: transform 0.15s var(--ease);
   }
   .pill:active { transform: scale(0.95); }
+  .pill.snd { color: var(--amber); min-width: 34px; text-align: center; font-size: 14px; line-height: 1; }
+  .pill.snd.off { color: var(--text-faint); text-decoration: line-through; }
 
   .court-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
   .court {
@@ -141,7 +143,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.7.0";
+  var VERSION = "1.8.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -150,6 +152,7 @@
   var LS_WENDLESS = "pong_wendless_v1";
   var LS_WNOMISS = "pong_wnomiss_v1";
   var LS_STATS = "pong_stats_v1";
+  var LS_SOUND = "pong_sound_v1";
 
   // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
   //   FLICK_REF   = how fast you must move the paddle (in court-widths/sec) to max out a flick
@@ -317,6 +320,39 @@
   function saveJSON(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e2) {} }
   function buzz(ms) { if (navigator.vibrate) navigator.vibrate(ms); }
 
+  // ---- sound: synthesized blips via Web Audio (no asset files, works offline) ----
+  var SND_ON = true, AC = null, lastSnd = {};
+  function audio() {
+    if (AC === null) {
+      try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) { AC = false; }
+    }
+    return AC || null;
+  }
+  function audioResume() { var ac = audio(); if (ac && ac.state === "suspended") ac.resume(); }
+  function blip(freq, dur, type, vol) {
+    var ac = audio(); if (!ac) return;
+    var now = ac.currentTime;
+    var o = ac.createOscillator(), g = ac.createGain();
+    o.type = type || "square"; o.frequency.setValueAtTime(freq, now);
+    g.gain.setValueAtTime(0.0001, now);
+    g.gain.exponentialRampToValueAtTime(vol || 0.1, now + 0.005);
+    g.gain.exponentialRampToValueAtTime(0.0001, now + (dur || 0.06));
+    o.connect(g); g.connect(ac.destination);
+    o.start(now); o.stop(now + (dur || 0.06) + 0.02);
+  }
+  function sfx(name) {
+    if (!SND_ON) return;
+    var ac = audio(); if (!ac) return;
+    var t = ac.currentTime;
+    if (lastSnd[name] && t - lastSnd[name] < 0.035) return; // throttle rapid bursts
+    lastSnd[name] = t;
+    if (name === "hit") blip(380, 0.05, "square", 0.10);
+    else if (name === "wall") blip(200, 0.045, "square", 0.07);
+    else if (name === "smash") blip(560, 0.08, "sawtooth", 0.13);
+    else if (name === "score") { blip(300, 0.09, "square", 0.12); setTimeout(function () { blip(180, 0.15, "square", 0.12); }, 95); }
+    else if (name === "ui") blip(440, 0.04, "square", 0.07);
+  }
+
   // Set ball velocity from a desired (vx,vy) direction, normalized to `speed`,
   // while guaranteeing enough vertical motion that the ball always crosses the court.
   function applyVel(g, vx, vy, speed) {
@@ -345,6 +381,9 @@
     var mmS = useState("play"); var menuMode = mmS[0], setMenuMode = mmS[1];
     var statsS = useState(function () { return loadJSON(LS_STATS, { wins: 0, losses: 0 }); });
     var stats = statsS[0], setStats = statsS[1];
+    var soundS = useState(function () { return loadJSON(LS_SOUND, true) !== false; });
+    var soundOn = soundS[0], setSoundOn = soundS[1];
+    SND_ON = soundOn; // keep the audio module in sync
     var modeS = useState("menu"); var mode = modeS[0], setMode = modeS[1]; // menu | playing | paused | over
     var pS = useState(0); var pScore = pS[0], setPScore = pS[1];
     var aS = useState(0); var aScore = aS[0], setAScore = aS[1];
@@ -406,6 +445,7 @@
     }
 
     function newGame() {
+      audioResume(); // unlock audio on this tap
       var g = ensureG(); placePaddles();
       g.player.x = g.W / 2; g.ai.x = g.W / 2;
       g.player.prevX = g.W / 2; g.ai.prevX = g.W / 2;
@@ -712,8 +752,8 @@
         g.ball.y += g.ball.vy * dt;
 
         // side walls
-        if (g.ball.x - g.ball.r < 0) { g.ball.x = g.ball.r; g.ball.vx = Math.abs(g.ball.vx); }
-        if (g.ball.x + g.ball.r > g.W) { g.ball.x = g.W - g.ball.r; g.ball.vx = -Math.abs(g.ball.vx); }
+        if (g.ball.x - g.ball.r < 0) { g.ball.x = g.ball.r; g.ball.vx = Math.abs(g.ball.vx); sfx("wall"); }
+        if (g.ball.x + g.ball.r > g.W) { g.ball.x = g.W - g.ball.r; g.ball.vx = -Math.abs(g.ball.vx); sfx("wall"); }
 
         if (g.spectate) {
           // swept, per-side collision (handles any speed without clipping through)
@@ -801,6 +841,7 @@
         var vx = g.ball.vx * 0.35 + offset * speed * 0.85 + paddleVx * 0.25; // english + flick direction
         applyVel(g, vx, vy, speed);
         buzz(smash > 1.4 ? 26 : 10);
+        sfx(smash > 1.4 ? "smash" : "hit");
       }
 
       function idleCheck(g, pad, dt) {
@@ -825,6 +866,7 @@
         var g = ensureG();
         g.sinceScore = 0;
         g.scoredBy = bottomScored ? "BOTTOM" : "TOP";
+        sfx("score");
         if (bottomScored) {
           var np = pScoreRef.current + 1; setPScore(np);
           if (np >= g.target) return finish(true);
@@ -952,6 +994,10 @@
           (spec && mode !== "menu")
             ? e("span", { className: "tally" }, "AI vs AI")
             : e("span", { className: "tally" }, "W " + stats.wins + " \u00B7 L " + stats.losses),
+          e("button", {
+            className: "pill snd" + (soundOn ? "" : " off"), title: "Sound",
+            onClick: function () { var v = !soundOn; setSoundOn(v); saveJSON(LS_SOUND, v); if (v) { audioResume(); sfx("ui"); } }
+          }, "\u266A"),
           mode === "playing" ? e("button", { className: "pill", onClick: function () { setMode("paused"); } }, "Pause") : null
         )
       ),
