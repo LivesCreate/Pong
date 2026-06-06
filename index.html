@@ -91,6 +91,15 @@
   .mode-tab:active { transform: scale(0.96); }
   .mode-tab.active { color: #000; background: var(--amber); border-color: var(--amber); }
   .pick-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-faint); margin: 4px 0 0; }
+  .menu-block.compact { gap: 7px; }
+  .menu-block.compact .pick-label { margin: 2px 0 0; }
+  .menu-block.compact .diff-btn { padding: 7px 11px; font-size: 12px; }
+  .menu-block.compact .diff-row.wrap { max-width: min(370px, 94vw); gap: 6px; }
+  .seg-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: min(330px, 86vw); margin-top: 3px; }
+  .seg-label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-faint); }
+  .seg-btns { display: flex; border: 1px solid var(--hairline); border-radius: 999px; overflow: hidden; }
+  .seg-btn { background: var(--surface-2); border: none; color: var(--text-dim); font-family: inherit; font-size: 12px; font-weight: 600; padding: 7px 13px; cursor: pointer; transition: background 0.14s var(--ease), color 0.14s var(--ease); }
+  .seg-btn.active { background: var(--amber); color: #000; }
   .ov-title { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; }
   .ov-title.win { color: var(--amber); }
   .ov-sub { font-size: 14px; color: var(--text-dim); margin-top: -6px; }
@@ -131,13 +140,14 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.5.0";
+  var VERSION = "1.6.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
   var LS_WBOT = "pong_wbot_v1";
   var LS_WUNCAP = "pong_wuncap_v1";
   var LS_WENDLESS = "pong_wendless_v1";
+  var LS_WNOMISS = "pong_wnomiss_v1";
   var LS_STATS = "pong_stats_v1";
 
   // Flick / smash mechanic: swinging the paddle fast at contact transfers speed to the ball.
@@ -179,6 +189,7 @@
   var SPEC_T2 = 10.0;         // uncapped stage-2 ceiling (4x -> 10x runs ~4x slower)
   var SPEC_CLIP = 9.0;        // above this multiplier, fast balls begin clipping through
   var SPEC_CEIL = 16.0;       // uncapped hard safety ceiling
+  var SPEC_NOMISS_LOCK = 6.0; // "never miss": ball climbs then LOCKS here (below clip, so no goals)
   var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
@@ -189,7 +200,16 @@
   // Drive an AI paddle. `pad` carries its own config + state so two AIs can coexist.
   function driveAI(g, pad, dt) {
     var D = pad.cfg; if (!D) return;
-    var heading = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
+    var heading0 = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
+    if (g.noMiss) {
+      // perfect goalie: track the ball exactly, never whiff
+      if (heading0) {
+        var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, g.ball.x));
+        pad.x += (tx - pad.x) * Math.min(1, 18 * dt);
+      }
+      return;
+    }
+    var heading = heading0;
     if (g.spectate) pad.missT -= dt; // countdown to the next forced whiff
     if (heading && !pad.appr) {
       var forceMiss = g.spectate && !g.uncap && pad.missT <= 0;
@@ -277,6 +297,8 @@
     var uncap = uncapS[0], setUncap = uncapS[1];
     var endlessS = useState(function () { return loadJSON(LS_WENDLESS, false) === true; });
     var endless = endlessS[0], setEndless = endlessS[1];
+    var aiModeS = useState(function () { return loadJSON(LS_WNOMISS, false) === true ? "nomiss" : "normal"; });
+    var aiMode = aiModeS[0], setAiMode = aiModeS[1];
     var mmS = useState("play"); var menuMode = mmS[0], setMenuMode = mmS[1];
     var statsS = useState(function () { return loadJSON(LS_STATS, { wins: 0, losses: 0 }); });
     var stats = statsS[0], setStats = statsS[1];
@@ -290,6 +312,7 @@
     var botRef = useRef(diffBottom); botRef.current = diffBottom;
     var uncapRef = useRef(uncap); uncapRef.current = uncap;
     var endlessRef = useRef(endless); endlessRef.current = endless;
+    var aiModeRef = useRef(aiMode); aiModeRef.current = aiMode;
     var menuModeRef = useRef(menuMode); menuModeRef.current = menuMode;
     var modeRef = useRef(mode); modeRef.current = mode;
 
@@ -305,7 +328,7 @@
           ph: 11, pad: 18, serveT: 0,
           keyL: false, keyR: false, keyHoldT: 0,
           spectate: false, target: 7, ballFrac: 0.58, elapsed: 0, blink: 0, topLabel: "", bottomLabel: "",
-          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false, specM: 1
+          uncap: false, rallyT: 0, sinceScore: 0, scoredBy: "", endless: false, specM: 1, noMiss: false
         };
       }
       return G.current;
@@ -355,6 +378,7 @@
         g.spectate = true;
         g.uncap = (uncapRef.current === true);
         g.endless = (endlessRef.current === true);
+        g.noMiss = (aiModeRef.current === "nomiss");
         g.ai.cfg = DIFFS[topRef.current]; g.ai.isAI = true;
         g.player.cfg = DIFFS[botRef.current]; g.player.isAI = true;
         g.topLabel = topRef.current; g.bottomLabel = botRef.current;
@@ -364,6 +388,7 @@
         g.spectate = false;
         g.uncap = false;
         g.endless = false;
+        g.noMiss = false;
         g.ai.cfg = DIFFS[diffRef.current]; g.ai.isAI = true;
         g.player.cfg = null; g.player.isAI = false;
         g.topLabel = diffRef.current; g.bottomLabel = "You";
@@ -545,7 +570,7 @@
         }
 
         // stall fail-safe warning + count near the REC tag
-        if (!g.endless && g.sinceScore > STALL_LIMIT - STALL_WARN) {
+        if (!g.endless && !g.noMiss && g.sinceScore > STALL_LIMIT - STALL_WARN) {
           var left = Math.max(0, Math.ceil(STALL_LIMIT - g.sinceScore));
           ctx.textAlign = "right"; ctx.textBaseline = "middle";
           ctx.fillStyle = "#e0564b";
@@ -607,7 +632,9 @@
         if (g.spectate) {
           g.rallyT += dt; g.sinceScore += dt;
           var base = g.H * g.ballFrac;
-          if (g.uncap) {
+          if (g.noMiss) {
+            g.specM = Math.min(SPEC_NOMISS_LOCK, g.specM + SPEC_RATE * dt); // climb then lock
+          } else if (g.uncap) {
             // stage the climb: each tier accelerates more slowly than the last
             var rate;
             if (g.specM < SPEC_MMAX) rate = SPEC_RATE;            // 1x -> 4x
@@ -617,13 +644,13 @@
           } else {
             g.specM += (SPEC_MMAX - g.specM) * Math.min(1, 0.6 * dt); // ease to 4x and hold
           }
-          var capSp = base * (g.uncap ? SPEC_CEIL : SPEC_MMAX);
+          var capSp = base * (g.noMiss ? SPEC_NOMISS_LOCK : (g.uncap ? SPEC_CEIL : SPEC_MMAX));
           var target = base * g.specM;
           var sp = Math.hypot(g.ball.vx, g.ball.vy);
           if (target > sp) sp += (target - sp) * Math.min(1, SPEC_APPROACH * dt); // only push up
           if (sp > capSp) sp = capSp;
           applyVel(g, g.ball.vx, g.ball.vy, sp);
-          if (!g.endless && g.sinceScore >= STALL_LIMIT) { finish(aScoreRef.current > pScoreRef.current ? false : true, true); return; }
+          if (!g.endless && !g.noMiss && g.sinceScore >= STALL_LIMIT) { finish(aScoreRef.current > pScoreRef.current ? false : true, true); return; }
         }
 
         // move ball (remember where it came from for swept collision)
@@ -679,7 +706,7 @@
         var frac = (plane - y0) / (b.y - y0); if (frac < 0) frac = 0; if (frac > 1) frac = 1;
         var cx = x0 + (b.x - x0) * frac;            // where the path crossed the paddle line
         var reach = pad.w / 2 + HIT_MARGIN + r;     // oversized hitbox
-        if (g.uncap && g.specM > SPEC_CLIP) {
+        if (g.uncap && !g.noMiss && g.specM > SPEC_CLIP) {
           // beyond clip speed the paddle can no longer fully cover — fast balls slip past
           var over = Math.min(1, (g.specM - SPEC_CLIP) / (SPEC_CEIL - SPEC_CLIP));
           reach = (pad.w / 2 + HIT_MARGIN + r) - over * (pad.w / 2 + HIT_MARGIN + r + pad.w * 0.5);
@@ -759,6 +786,14 @@
         })
       );
     }
+    function seg(label, opts) {
+      return e("div", { className: "seg-row" },
+        e("span", { className: "seg-label" }, label),
+        e("div", { className: "seg-btns" }, opts.map(function (o, i) {
+          return e("button", { key: i, className: "seg-btn" + (o.on ? " active" : ""), onClick: o.onClick }, o.txt);
+        }))
+      );
+    }
 
     // ---- overlays ----
     var spec = G.current && G.current.spectate;
@@ -774,33 +809,35 @@
           ? e("div", { className: "menu-block" },
               e("div", { className: "ov-sub" }, "First to 7 \u00B7 you're on the bottom"),
               pills(diff, chooseDiff))
-          : e("div", { className: "menu-block" },
-              e("div", { className: "ov-sub" }, (endless ? "Endless" : "First to 10") + " \u00B7 you spectate"),
+          : e("div", { className: "menu-block compact" },
               e("div", { className: "pick-label" }, "Top side"),
               pills(diffTop, chooseTop),
               e("div", { className: "pick-label" }, "Bottom side"),
               pills(diffBottom, chooseBottom),
-              e("div", { className: "pick-label" }, "Ball speed"),
-              e("div", { className: "diff-row" },
-                e("button", { className: "diff-btn" + (!uncap ? " active" : ""), onClick: function () { setUncap(false); saveJSON(LS_WUNCAP, false); } }, "Capped"),
-                e("button", { className: "diff-btn" + (uncap ? " active" : ""), onClick: function () { setUncap(true); saveJSON(LS_WUNCAP, true); } }, "Uncapped")
-              ),
-              e("div", { className: "pick-label" }, "Match length"),
-              e("div", { className: "diff-row" },
-                e("button", { className: "diff-btn" + (!endless ? " active" : ""), onClick: function () { setEndless(false); saveJSON(LS_WENDLESS, false); } }, "First to 10"),
-                e("button", { className: "diff-btn" + (endless ? " active" : ""), onClick: function () { setEndless(true); saveJSON(LS_WENDLESS, true); } }, "Endless")
-              )),
+              seg("Ball", [
+                { txt: "Capped", on: !uncap, onClick: function () { setUncap(false); saveJSON(LS_WUNCAP, false); } },
+                { txt: "Uncapped", on: uncap, onClick: function () { setUncap(true); saveJSON(LS_WUNCAP, true); } }
+              ]),
+              seg("Length", [
+                { txt: "To 10", on: !endless, onClick: function () { setEndless(false); saveJSON(LS_WENDLESS, false); } },
+                { txt: "Endless", on: endless, onClick: function () { setEndless(true); saveJSON(LS_WENDLESS, true); } }
+              ]),
+              seg("AI", [
+                { txt: "Normal", on: aiMode === "normal", onClick: function () { setAiMode("normal"); saveJSON(LS_WNOMISS, false); } },
+                { txt: "Never miss", on: aiMode === "nomiss", onClick: function () { setAiMode("nomiss"); saveJSON(LS_WNOMISS, true); } }
+              ])),
         e("button", { className: "btn-primary", onClick: newGame }, menuMode === "play" ? "Play" : "Watch"),
         menuMode === "play"
           ? e("div", { className: "hint" }, "Drag to move \u00B7 ", e("kbd", null, "\u2190\u2192"), " / ", e("kbd", null, "A D"), " \u00B7 ", e("kbd", null, "Space"), " pause")
-          : e("div", { className: "hint" }, "Sit back \u2014 it plays itself")
+          : e("div", { className: "hint" }, aiMode === "nomiss" ? "Never miss \u2014 endless perfect rally" : "Sit back \u2014 it plays itself")
       );
     } else if (mode === "paused") {
       overlay = e("div", { className: "overlay" },
         e("div", { className: "ov-title" }, "Paused"),
         (spec && G.current) ? e("div", { className: "pause-settings" },
           e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "Ball speed"), e("span", { className: "ps-v" }, G.current.uncap ? "Uncapped" : "Capped")),
-          e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "Match"), e("span", { className: "ps-v" }, G.current.endless ? "Endless" : "First to 10"))
+          e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "Match"), e("span", { className: "ps-v" }, G.current.endless ? "Endless" : "First to 10")),
+          e("div", { className: "ps-row" }, e("span", { className: "ps-k" }, "AI"), e("span", { className: "ps-v" }, G.current.noMiss ? "Never miss" : "Normal"))
         ) : null,
         e("button", { className: "btn-primary", onClick: function () { setMode("playing"); } }, "Resume"),
         e("button", { className: "btn-ghost", onClick: function () { setMode("menu"); } }, "Quit to menu")
