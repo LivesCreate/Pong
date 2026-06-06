@@ -140,7 +140,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.6.0";
+  var VERSION = "1.6.1";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -190,6 +190,7 @@
   var SPEC_CLIP = 9.0;        // above this multiplier, fast balls begin clipping through
   var SPEC_CEIL = 16.0;       // uncapped hard safety ceiling
   var SPEC_NOMISS_LOCK = 6.0; // "never miss": ball climbs then LOCKS here (below clip, so no goals)
+  var NOMISS_VIS = 22;        // never-miss: how fast the VISIBLE paddle races to the spot (hitbox teleports)
   var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
@@ -198,15 +199,30 @@
   var STALL_WARN = 60;    // start warning this long before the limit
 
   // Drive an AI paddle. `pad` carries its own config + state so two AIs can coexist.
+  // Predict where the ball will cross a paddle's line (folding side-wall bounces in).
+  function predictX(g, pad) {
+    var b = g.ball;
+    var planeY = pad.isTop ? (g.pad + g.ph + b.r) : (g.H - g.pad - g.ph - b.r);
+    var toward = pad.isTop ? (b.vy < 0) : (b.vy > 0);
+    if (!toward || b.vy === 0) return pad.x; // ball not coming — hold
+    var t = (planeY - b.y) / b.vy;
+    if (t < 0) return pad.x;
+    var x = b.x + b.vx * t;
+    var lo = b.r, hi = g.W - b.r, span = hi - lo;
+    if (span <= 0) return pad.x;
+    var rel = (((x - lo) % (2 * span)) + 2 * span) % (2 * span);
+    return rel <= span ? lo + rel : lo + (2 * span - rel);
+  }
+
   function driveAI(g, pad, dt) {
     var D = pad.cfg; if (!D) return;
     var heading0 = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
     if (g.noMiss) {
-      // perfect goalie: track the ball exactly, never whiff
-      if (heading0) {
-        var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, g.ball.x));
-        pad.x += (tx - pad.x) * Math.min(1, 18 * dt);
-      }
+      // hitbox teleports to the predicted landing spot (never misses);
+      // the drawn paddle just races there fast so it looks like motion.
+      var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, predictX(g, pad)));
+      pad.x = tx;
+      pad.vis += (tx - pad.vis) * Math.min(1, NOMISS_VIS * dt);
       return;
     }
     var heading = heading0;
@@ -321,8 +337,8 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
-          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
@@ -359,12 +375,14 @@
       g.trail = [];
       g.player.prevX = g.player.x; g.player.vxS = 0;
       g.ai.prevX = g.ai.x; g.ai.vxS = 0;
+      g.player.vis = g.player.x; g.ai.vis = g.ai.x;
     }
 
     function newGame() {
       var g = ensureG(); placePaddles();
       g.player.x = g.W / 2; g.ai.x = g.W / 2;
       g.player.prevX = g.W / 2; g.ai.prevX = g.W / 2;
+      g.player.vis = g.W / 2; g.ai.vis = g.W / 2;
       g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
       g.keyL = false; g.keyR = false; g.keyHoldT = 0;
       g.player.appr = false; g.ai.appr = false;
@@ -512,10 +530,12 @@
         ctx.fillText(String(aScoreRef.current), W / 2, H * 0.28);
         ctx.fillText(String(pScoreRef.current), W / 2, H * 0.72);
       }
-      // paddles
+      // paddles (never-miss draws the VISIBLE racer; the hitbox lives at pad.x)
       ctx.fillStyle = "#f5b942";
-      rr(ctx, g.ai.x - g.ai.w / 2, g.pad, g.ai.w, g.ph, g.ph / 2);
-      rr(ctx, g.player.x - g.player.w / 2, H - g.pad - g.ph, g.player.w, g.ph, g.ph / 2);
+      var aix = g.noMiss ? g.ai.vis : g.ai.x;
+      var plx = g.noMiss ? g.player.vis : g.player.x;
+      rr(ctx, aix - g.ai.w / 2, g.pad, g.ai.w, g.ph, g.ph / 2);
+      rr(ctx, plx - g.player.w / 2, H - g.pad - g.ph, g.player.w, g.ph, g.ph / 2);
       // ball trail (reads speed on smashes)
       var tr = g.trail || [];
       for (var ti = 0; ti < tr.length; ti++) {
@@ -711,9 +731,11 @@
           var over = Math.min(1, (g.specM - SPEC_CLIP) / (SPEC_CEIL - SPEC_CLIP));
           reach = (pad.w / 2 + HIT_MARGIN + r) - over * (pad.w / 2 + HIT_MARGIN + r + pad.w * 0.5);
         }
-        if (cx >= pad.x - reach && cx <= pad.x + reach) {
+        var inRange = (cx >= pad.x - reach && cx <= pad.x + reach);
+        if (g.noMiss || inRange) {
           b.y = plane; b.x = cx;                    // snap to contact point
-          bounce(g, pad.x, pad.vxS);                // bounce off this paddle
+          if (g.noMiss) bounce(g, pad.vis, 0);      // bounce off the VISIBLE paddle; no flick from teleport
+          else bounce(g, pad.x, pad.vxS);
           return true;
         }
         return false; // not in range — passes through toward a score
