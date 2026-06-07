@@ -147,7 +147,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.9.0";
+  var VERSION = "1.10.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -204,6 +204,13 @@
   var FLAT_LIMIT = 0.4;       // seconds of near-vertical travel before a random sideways nudge
   var IDLE_LIMIT = 5;         // seconds an AI paddle may stay still before a point penalty
   var IDLE_EPS = 2;           // px; movement under this counts as "not moving"
+  // Movement "fun" score (1..1000) + forced roaming when an AI barely moves.
+  var FUN_HALFLIFE = 6;       // seconds the movement score remembers over
+  var FUN_LOW = 150;          // below this (of 1000) = barely moving
+  var FUN_PATIENCE = 1.5;     // seconds of low movement tolerated before forcing
+  var FORCE_BASE = 10;        // seconds of forced full-width patrol
+  var FORCE_MAXEXTRA = 40;    // extra forced seconds when chronically low
+  var SND_LEAD = 0.06;        // play the paddle-hit sound this many seconds early
   var SPEC_APPROACH = 1.2;    // how quickly current speed eases toward the target
   var HIT_MARGIN = 20;    // paddle hitbox expansion in px (registers a touch slightly early)
   var MISS_MIN = 10, MISS_MAX = 20; // seconds between forced AI whiffs
@@ -243,6 +250,48 @@
     }
   }
 
+  // Forced full-width patrol — used when a paddle's movement "fun" score is too low.
+  function patrol(g, pad, dt) {
+    if (pad.patrolDir === 0) pad.patrolDir = Math.random() < 0.5 ? -1 : 1;
+    var spd = g.W * 1.6 * dt; // brisk sweep end to end
+    pad.x += pad.patrolDir * spd;
+    if (pad.x <= pad.w / 2) { pad.x = pad.w / 2; pad.patrolDir = 1; }
+    else if (pad.x >= g.W - pad.w / 2) { pad.x = g.W - pad.w / 2; pad.patrolDir = -1; }
+  }
+
+  // When the ball is heading away, keep moving: patrol if scored low, else gently wander.
+  function idleMove(g, pad, dt) {
+    if (pad.forceT > 0) patrol(g, pad, dt); else wander(g, pad, dt);
+  }
+
+  // Movement "fun" score (1..1000) over a rolling window; force roaming when too low.
+  function funMove(g, pad, dt) {
+    if (!pad.isAI) return;
+    var dx = Math.abs(pad.x - pad.lastFunX); pad.lastFunX = pad.x;
+    pad.mv = pad.mv * Math.pow(0.5, dt / FUN_HALFLIFE) + dx;
+    var perSec = pad.mv / FUN_HALFLIFE;                       // ~px moved per second
+    pad.fun = Math.max(1, Math.min(1000, Math.round((perSec / (g.W * 0.9)) * 1000)));
+    if (pad.fun < FUN_LOW) pad.lowT += dt; else pad.lowT = Math.max(0, pad.lowT - dt * 2);
+    if (pad.forceT > 0) pad.forceT -= dt;
+    else if (pad.lowT > FUN_PATIENCE) pad.forceT = FORCE_BASE + Math.min(FORCE_MAXEXTRA, pad.lowT * 1.5);
+  }
+
+  // Play the paddle-hit sound a few frames before contact so it feels in sync.
+  function preSound(g, pad) {
+    var b = g.ball, r = b.r;
+    var toward = pad.isTop ? (b.vy < 0) : (b.vy > 0);
+    if (!toward || b.vy === 0) { pad.sndArmed = false; return; }
+    var planeY = pad.isTop ? (g.pad + g.ph + r) : (g.H - g.pad - g.ph - r);
+    var t = (planeY - b.y) / b.vy;
+    if (t <= 0 || t > SND_LEAD || pad.sndArmed) return;
+    var px = predictX(g, pad);
+    var reach = pad.w / 2 + r + (g.spectate ? HIT_MARGIN : 0);
+    if (Math.abs(px - pad.x) <= reach) {
+      if (!pad.isAI && Math.abs(pad.vxS) > g.W * FLICK_REF * 0.5) sfx("smash"); else sfx("hit");
+      pad.sndArmed = true;
+    }
+  }
+
   function driveAI(g, pad, dt) {
     var D = pad.cfg; if (!D) return;
     var heading0 = pad.isTop ? (g.ball.vy < 0) : (g.ball.vy > 0);
@@ -253,7 +302,7 @@
         var tx = Math.max(pad.w / 2, Math.min(g.W - pad.w / 2, predictX(g, pad)));
         pad.x = tx;
       } else {
-        wander(g, pad, dt); // ball moving away — drift so it isn't frozen
+        idleMove(g, pad, dt); // ball moving away — patrol if low fun score, else drift
       }
       pad.vis += (pad.x - pad.vis) * Math.min(1, NOMISS_VIS * dt);
       return;
@@ -288,7 +337,7 @@
         }
       }
     } else {
-      wander(g, pad, dt); // ball moving away — keep moving instead of camping
+      idleMove(g, pad, dt); // ball moving away — keep moving (patrol if low fun, else drift)
     }
   }
 
@@ -415,8 +464,8 @@
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0 },
-          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0 },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
@@ -454,6 +503,8 @@
       g.player.prevX = g.player.x; g.player.vxS = 0;
       g.ai.prevX = g.ai.x; g.ai.vxS = 0;
       g.player.vis = g.player.x; g.ai.vis = g.ai.x;
+      g.player.sndArmed = false; g.ai.sndArmed = false;
+      g.player.lastFunX = g.player.x; g.ai.lastFunX = g.ai.x;
     }
 
     function newGame() {
@@ -464,6 +515,10 @@
       g.player.vis = g.W / 2; g.ai.vis = g.W / 2;
       g.player.lastX2 = g.W / 2; g.ai.lastX2 = g.W / 2;
       g.player.idleT = 0; g.ai.idleT = 0; g.player.wanderT = 0; g.ai.wanderT = 0;
+      g.player.mv = 0; g.ai.mv = 0; g.player.fun = 1000; g.ai.fun = 1000;
+      g.player.forceT = 0; g.ai.forceT = 0; g.player.lowT = 0; g.ai.lowT = 0;
+      g.player.lastFunX = g.W / 2; g.ai.lastFunX = g.W / 2;
+      g.player.sndArmed = false; g.ai.sndArmed = false;
       g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
       g.keyL = false; g.keyR = false; g.keyHoldT = 0;
       g.player.appr = false; g.ai.appr = false;
@@ -647,11 +702,15 @@
         var sec = Math.floor(g.elapsed), mm = Math.floor(sec / 60), ss = sec % 60;
         ctx.textAlign = "right"; ctx.fillStyle = "rgba(245,245,247,0.6)";
         ctx.fillText("REC " + mm + ":" + (ss < 10 ? "0" : "") + ss, W - m - 6, m + 22);
-        // side difficulty labels
+        // side difficulty labels + movement "fun" score
         ctx.textAlign = "center"; ctx.fillStyle = "rgba(245,185,66,0.5)";
         ctx.font = "700 11px ui-monospace, Menlo, monospace";
         ctx.fillText(g.topLabel.toUpperCase(), W / 2, g.pad + g.ph + 18);
         ctx.fillText(g.bottomLabel.toUpperCase(), W / 2, H - g.pad - g.ph - 18);
+        ctx.fillStyle = "rgba(245,185,66,0.32)";
+        ctx.font = "700 9px ui-monospace, Menlo, monospace";
+        ctx.fillText("FUN " + g.ai.fun, W / 2, g.pad + g.ph + 31);
+        ctx.fillText("FUN " + g.player.fun, W / 2, H - g.pad - g.ph - 31);
 
         // faint scanlines + vignette to sell the "feed" look
         ctx.fillStyle = "rgba(0,0,0,0.05)";
@@ -733,6 +792,11 @@
         // anti-idle: penalize an AI paddle that stops moving during active play
         idleCheck(g, g.ai, dt);
         if (g.player.isAI) idleCheck(g, g.player, dt);
+        // movement "fun" score + forced roaming when too low
+        funMove(g, g.ai, dt);
+        if (g.player.isAI) funMove(g, g.player, dt);
+        // pre-fire the hit sound a few frames before contact (both paddles)
+        preSound(g, g.ai); preSound(g, g.player);
 
         // spectate: ball eases up through speed tiers, accelerating less as it gets faster
         if (g.spectate) {
@@ -854,7 +918,6 @@
         var vx = g.ball.vx * 0.35 + offset * speed * 0.85 + paddleVx * 0.25; // english + flick direction
         applyVel(g, vx, vy, speed);
         buzz(smash > 1.4 ? 26 : 10);
-        sfx(smash > 1.4 ? "smash" : "hit");
       }
 
       function idleCheck(g, pad, dt) {

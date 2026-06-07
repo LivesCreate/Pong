@@ -2,7 +2,7 @@
   "name": "Pong",
   "short_name": "Pong",
   "description": "Vertical Pong against an AI opponent.",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
