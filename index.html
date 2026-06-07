@@ -147,7 +147,7 @@
   "use strict";
   var e = React.createElement;
   var useState = React.useState, useEffect = React.useEffect, useRef = React.useRef;
-  var VERSION = "1.10.0";
+  var VERSION = "1.11.0";
 
   var LS_DIFF = "pong_diff_v1";
   var LS_WTOP = "pong_wtop_v1";
@@ -204,9 +204,9 @@
   var FLAT_LIMIT = 0.4;       // seconds of near-vertical travel before a random sideways nudge
   var IDLE_LIMIT = 5;         // seconds an AI paddle may stay still before a point penalty
   var IDLE_EPS = 2;           // px; movement under this counts as "not moving"
-  // Movement "fun" score (1..1000) + forced roaming when an AI barely moves.
-  var FUN_HALFLIFE = 6;       // seconds the movement score remembers over
-  var FUN_LOW = 150;          // below this (of 1000) = barely moving
+  // Movement "fun" score (1..1000): rewards covering BOTH halves, not just twitching in one.
+  var FUN_WINDOW = 4;         // seconds before an unvisited half decays to zero
+  var FUN_LOW = 100;          // below this = camping one side / barely roaming
   var FUN_PATIENCE = 1.5;     // seconds of low movement tolerated before forcing
   var FORCE_BASE = 10;        // seconds of forced full-width patrol
   var FORCE_MAXEXTRA = 40;    // extra forced seconds when chronically low
@@ -264,13 +264,12 @@
     if (pad.forceT > 0) patrol(g, pad, dt); else wander(g, pad, dt);
   }
 
-  // Movement "fun" score (1..1000) over a rolling window; force roaming when too low.
+  // Movement "fun" score: high only if BOTH halves of the court are visited recently.
   function funMove(g, pad, dt) {
     if (!pad.isAI) return;
-    var dx = Math.abs(pad.x - pad.lastFunX); pad.lastFunX = pad.x;
-    pad.mv = pad.mv * Math.pow(0.5, dt / FUN_HALFLIFE) + dx;
-    var perSec = pad.mv / FUN_HALFLIFE;                       // ~px moved per second
-    pad.fun = Math.max(1, Math.min(1000, Math.round((perSec / (g.W * 0.9)) * 1000)));
+    if (pad.x < g.W / 2) { pad.visL = 1; pad.visR = Math.max(0, pad.visR - dt / FUN_WINDOW); }
+    else { pad.visR = 1; pad.visL = Math.max(0, pad.visL - dt / FUN_WINDOW); }
+    pad.fun = Math.max(1, Math.min(1000, Math.round(1000 * Math.min(pad.visL, pad.visR))));
     if (pad.fun < FUN_LOW) pad.lowT += dt; else pad.lowT = Math.max(0, pad.lowT - dt * 2);
     if (pad.forceT > 0) pad.forceT -= dt;
     else if (pad.lowT > FUN_PATIENCE) pad.forceT = FORCE_BASE + Math.min(FORCE_MAXEXTRA, pad.lowT * 1.5);
@@ -444,6 +443,7 @@
     HAPTICS_ON = hapticsOn;
     var setOpenS = useState(false); var settingsOpen = setOpenS[0], setSettingsOpen = setOpenS[1];
     var confirmS = useState(false); var confirmReset = confirmS[0], setConfirmReset = confirmS[1];
+    var dbgS = useState(false); var dbg = dbgS[0], setDbg = dbgS[1];
     var modeS = useState("menu"); var mode = modeS[0], setMode = modeS[1]; // menu | playing | paused | over
     var pS = useState(0); var pScore = pS[0], setPScore = pS[1];
     var aS = useState(0); var aScore = aS[0], setAScore = aS[1];
@@ -458,14 +458,15 @@
     var menuModeRef = useRef(menuMode); menuModeRef.current = menuMode;
     var modeRef = useRef(mode); modeRef.current = mode;
     var settingsOpenRef = useRef(settingsOpen); settingsOpenRef.current = settingsOpen;
+    var dbgRef = useRef(dbg); dbgRef.current = dbg;
 
     // ---- init game state object ----
     function ensureG() {
       if (!G.current) {
         G.current = {
           W: 300, H: 460,
-          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false },
-          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false },
+          player: { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: false, isAI: false, cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false, visL: 1, visR: 1 },
+          ai:     { x: 150, w: 70, prevX: 150, vxS: 0, vis: 150, isTop: true,  isAI: true,  cfg: null, err: 0, appr: false, blunder: false, target: 150, reactT: 0, missT: 15, aimOffset: 0, wanderX: 150, wanderT: 0, lastX2: 150, idleT: 0, mv: 0, fun: 1000, forceT: 0, lowT: 0, patrolDir: 0, lastFunX: 150, sndArmed: false, visL: 1, visR: 1 },
           ball: { x: 150, y: 230, vx: 0, vy: 0, r: 7 },
           trail: [],
           ph: 11, pad: 18, serveT: 0,
@@ -519,6 +520,7 @@
       g.player.forceT = 0; g.ai.forceT = 0; g.player.lowT = 0; g.ai.lowT = 0;
       g.player.lastFunX = g.W / 2; g.ai.lastFunX = g.W / 2;
       g.player.sndArmed = false; g.ai.sndArmed = false;
+      g.player.visL = 1; g.player.visR = 1; g.ai.visL = 1; g.ai.visR = 1;
       g.player.vxS = 0; g.ai.vxS = 0; g.trail = [];
       g.keyL = false; g.keyR = false; g.keyHoldT = 0;
       g.player.appr = false; g.ai.appr = false;
@@ -599,6 +601,9 @@
         } else if (k === "ArrowRight" || k === "d" || k === "D") {
           ev.preventDefault();
           if (!g.keyR) { g.keyR = true; if (!g.keyL) g.keyHoldT = 0; }
+        } else if (k === "F12" || k === "`" || k === "~") {
+          ev.preventDefault();
+          setDbg(function (d) { return !d; });
         } else if (k === " " || ev.code === "Space") {
           ev.preventDefault();
           if (modeRef.current === "playing") setMode("paused");
@@ -737,6 +742,32 @@
           ctx.font = "700 11px ui-monospace, Menlo, monospace";
           ctx.fillText("AIs stalling \u00B7 ending in " + left + "s", W - m - 6, m + 40);
         }
+      }
+
+      // F12 / ` debug overlay — live internals
+      if (dbgRef.current) {
+        var sp = Math.hypot(g.ball.vx, g.ball.vy);
+        var lines = [
+          "DEBUG (F12 / `)",
+          "mode " + modeRef.current + (g.spectate ? " | spectate" : " | play"),
+          "uncap " + g.uncap + "  endless " + g.endless + "  noMiss " + g.noMiss,
+          "score  top " + aScoreRef.current + "  bot " + pScoreRef.current + "  target " + (g.target === Infinity ? "inf" : g.target),
+          "ball  " + sp.toFixed(0) + "px/s  x" + g.specM.toFixed(2) + "  vx " + g.ball.vx.toFixed(0) + " vy " + g.ball.vy.toFixed(0),
+          "rally " + g.rallyT.toFixed(1) + "s  sinceScore " + g.sinceScore.toFixed(1) + "s  flat " + g.flatT.toFixed(2),
+          "TOP  x" + g.ai.x.toFixed(0) + " fun " + g.ai.fun + " force " + g.ai.forceT.toFixed(1) + " L" + g.ai.visL.toFixed(2) + " R" + g.ai.visR.toFixed(2),
+          "BOT  x" + g.player.x.toFixed(0) + " fun " + g.player.fun + " force " + g.player.forceT.toFixed(1) + " L" + g.player.visL.toFixed(2) + " R" + g.player.visR.toFixed(2)
+        ];
+        ctx.textAlign = "left"; ctx.textBaseline = "top";
+        ctx.font = "600 10px ui-monospace, Menlo, monospace";
+        var pad2 = 6, lh = 13, bw = 250, bh = pad2 * 2 + lines.length * lh;
+        ctx.fillStyle = "rgba(0,0,0,0.78)";
+        ctx.fillRect(8, 8, bw, bh);
+        ctx.strokeStyle = "rgba(245,185,66,0.5)"; ctx.lineWidth = 1; ctx.strokeRect(8, 8, bw, bh);
+        // the (normally invisible) half divider, shown only in debug
+        ctx.strokeStyle = "rgba(245,185,66,0.25)";
+        ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H); ctx.stroke();
+        ctx.fillStyle = "#f5b942";
+        for (var di = 0; di < lines.length; di++) ctx.fillText(lines[di], 8 + pad2, 8 + pad2 + di * lh);
       }
     }
     function rr(ctx, x, y, w, h, r) {
