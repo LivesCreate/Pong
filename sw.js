@@ -1,5 +1,5 @@
 // Pong service worker
-const CACHE_NAME = "pong-v1.11.0";
+const CACHE_NAME = "pong-v1.12.0-in";
 const APP_SHELL = ["./", "./index.html", "./manifest.json"];
 
 self.addEventListener("install", function (event) {
